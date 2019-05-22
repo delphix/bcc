@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/python
 #
 # nodejs_http_server    Basic example of node.js USDT tracing.
 #                       For Linux, uses BCC, BPF. Embedded C.
@@ -10,6 +10,7 @@
 
 from __future__ import print_function
 from bcc import BPF, USDT
+from bcc.utils import printb
 import sys
 
 if len(sys.argv) < 2:
@@ -51,4 +52,6 @@ while 1:
     except ValueError:
         print("value error")
         continue
-    print("%-18.9f %-16s %-6d %s" % (ts, task, pid, msg))
+    except KeyboardInterrupt:
+        exit()
+    printb(b"%-18.9f %-16s %-6d %s" % (ts, task, pid, msg))

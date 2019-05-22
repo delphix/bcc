@@ -51,7 +51,17 @@ R"********(
  * different sections in elf_bpf file. Section names
  * are interpreted by elf_bpf loader
  */
-#define SEC(NAME) __attribute__((section(NAME), used))
+#define BCC_SEC(NAME) __attribute__((section(NAME), used))
+
+// Associate map with its key/value types
+#define BPF_ANNOTATE_KV_PAIR(name, type_key, type_val)	\
+        struct ____btf_map_##name {			\
+                type_key key;				\
+                type_val value;				\
+        };						\
+        struct ____btf_map_##name			\
+        __attribute__ ((section(".maps." #name), used))	\
+                ____btf_map_##name = { }
 
 // Changes to the macro require changes in BFrontendAction classes
 #define BPF_F_TABLE(_table_type, _key_type, _leaf_type, _name, _max_entries, _flags) \
@@ -70,7 +80,8 @@ struct _name##_table_t { \
   int flags; \
 }; \
 __attribute__((section("maps/" _table_type))) \
-struct _name##_table_t _name = { .flags = (_flags), .max_entries = (_max_entries) }
+struct _name##_table_t _name = { .flags = (_flags), .max_entries = (_max_entries) }; \
+BPF_ANNOTATE_KV_PAIR(_name, _key_type, _leaf_type)
 
 #define BPF_TABLE(_table_type, _key_type, _leaf_type, _name, _max_entries) \
 BPF_F_TABLE(_table_type, _key_type, _leaf_type, _name, _max_entries, 0)
@@ -216,8 +227,15 @@ struct bpf_stacktrace {
   u64 ip[BPF_MAX_STACK_DEPTH];
 };
 
+struct bpf_stacktrace_buildid {
+  struct bpf_stack_build_id trace[BPF_MAX_STACK_DEPTH];
+};
+
 #define BPF_STACK_TRACE(_name, _max_entries) \
   BPF_TABLE("stacktrace", int, struct bpf_stacktrace, _name, roundup_pow_of_two(_max_entries))
+
+#define BPF_STACK_TRACE_BUILDID(_name, _max_entries) \
+  BPF_F_TABLE("stacktrace", int, struct bpf_stacktrace_buildid, _name, roundup_pow_of_two(_max_entries), BPF_F_STACK_BUILD_ID)
 
 #define BPF_PROG_ARRAY(_name, _max_entries) \
   BPF_TABLE("prog", u32, u32, _name, _max_entries)
@@ -244,9 +262,9 @@ struct _name##_table_t _name = { .max_entries = (_max_entries) }
   ({ void *_tmp = _cursor; _cursor += _len; _tmp; })
 
 #ifdef LINUX_VERSION_CODE_OVERRIDE
-unsigned _version SEC("version") = LINUX_VERSION_CODE_OVERRIDE;
+unsigned _version BCC_SEC("version") = LINUX_VERSION_CODE_OVERRIDE;
 #else
-unsigned _version SEC("version") = LINUX_VERSION_CODE;
+unsigned _version BCC_SEC("version") = LINUX_VERSION_CODE;
 #endif
 
 /* helper functions called from eBPF programs written in C */
@@ -323,10 +341,29 @@ static int (*bpf_skb_adjust_room)(void *ctx, int len_diff, u32 mode, u64 flags) 
   (void *) BPF_FUNC_skb_adjust_room;
 static int (*bpf_skb_under_cgroup)(void *ctx, void *map, int index) =
   (void *) BPF_FUNC_skb_under_cgroup;
+static struct bpf_sock *(*bpf_skc_lookup_tcp)(void *ctx, struct bpf_sock_tuple *tuple, int size,
+                                              unsigned long long netns_id,
+                                              unsigned long long flags) =
+  (void *) BPF_FUNC_skc_lookup_tcp;
 static int (*bpf_sk_redirect_map)(void *ctx, void *map, int key, int flags) =
   (void *) BPF_FUNC_sk_redirect_map;
 static int (*bpf_sock_map_update)(void *map, void *key, void *value, unsigned long long flags) =
   (void *) BPF_FUNC_sock_map_update;
+static int (*bpf_strtol)(const char *buf, size_t buf_len, u64 flags, long *res) =
+  (void *) BPF_FUNC_strtol;
+static int (*bpf_strtoul)(const char *buf, size_t buf_len, u64 flags, unsigned long *res) =
+  (void *) BPF_FUNC_strtoul;
+static int (*bpf_sysctl_get_current_value)(struct bpf_sysctl *ctx, char *buf, size_t buf_len) =
+  (void *) BPF_FUNC_sysctl_get_current_value;
+static int (*bpf_sysctl_get_name)(struct bpf_sysctl *ctx, char *buf, size_t buf_len, u64 flags) =
+  (void *) BPF_FUNC_sysctl_get_name;
+static int (*bpf_sysctl_get_new_value)(struct bpf_sysctl *ctx, char *buf, size_t buf_len) =
+  (void *) BPF_FUNC_sysctl_get_new_value;
+static int (*bpf_sysctl_set_new_value)(struct bpf_sysctl *ctx, const char *buf, size_t buf_len) =
+  (void *) BPF_FUNC_sysctl_set_new_value;
+static int (*bpf_tcp_check_syncookie)(struct bpf_sock *sk, void *ip, int ip_len, void *tcp,
+                                      int tcp_len) =
+  (void *) BPF_FUNC_tcp_check_syncookie;
 static int (*bpf_xdp_adjust_meta)(void *ctx, int offset) =
   (void *) BPF_FUNC_xdp_adjust_meta;
 
@@ -454,6 +491,23 @@ static int (*bpf_msg_pop_data)(void *msg, u32 start, u32 pop, u64 flags) =
   (void *) BPF_FUNC_msg_pop_data;
 static int (*bpf_rc_pointer_rel)(void *ctx, s32 rel_x, s32 rel_y) =
   (void *) BPF_FUNC_rc_pointer_rel;
+static void (*bpf_spin_lock)(struct bpf_spin_lock *lock) =
+  (void *) BPF_FUNC_spin_lock;
+static void (*bpf_spin_unlock)(struct bpf_spin_lock *lock) =
+  (void *) BPF_FUNC_spin_unlock;
+static struct bpf_sock *(*bpf_sk_fullsock)(struct bpf_sock *sk) =
+  (void *) BPF_FUNC_sk_fullsock;
+static struct bpf_tcp_sock *(*bpf_tcp_sock)(struct bpf_sock *sk) =
+  (void *) BPF_FUNC_tcp_sock;
+static int (*bpf_skb_ecn_set_ce)(void *ctx) =
+  (void *) BPF_FUNC_skb_ecn_set_ce;
+static struct bpf_sock *(*bpf_get_listener_sock)(struct bpf_sock *sk) =
+  (void *) BPF_FUNC_get_listener_sock;
+static void *(*bpf_sk_storage_get)(void *map, struct bpf_sock *sk,
+                                   void *value, __u64 flags) =
+  (void *) BPF_FUNC_sk_storage_get;
+static int (*bpf_sk_storage_delete)(void *map, struct bpf_sock *sk) =
+  (void *)BPF_FUNC_sk_storage_delete;
 
 /* llvm builtin functions that eBPF C program may use to
  * emit BPF_LD_ABS and BPF_LD_IND instructions
@@ -575,7 +629,7 @@ unsigned int bpf_log2l(unsigned long v)
 struct bpf_context;
 
 static inline __attribute__((always_inline))
-SEC("helpers")
+BCC_SEC("helpers")
 u64 bpf_dext_pkt(void *pkt, u64 off, u64 bofs, u64 bsz) {
   if (bofs == 0 && bsz == 8) {
     return load_byte(pkt, off);
@@ -598,7 +652,7 @@ u64 bpf_dext_pkt(void *pkt, u64 off, u64 bofs, u64 bsz) {
 }
 
 static inline __attribute__((always_inline))
-SEC("helpers")
+BCC_SEC("helpers")
 void bpf_dins_pkt(void *pkt, u64 off, u64 bofs, u64 bsz, u64 val) {
   // The load_xxx function does a bswap before returning the short/word/dword,
   // so the value in register will always be host endian. However, the bytes
@@ -641,25 +695,25 @@ void bpf_dins_pkt(void *pkt, u64 off, u64 bofs, u64 bsz, u64 val) {
 }
 
 static inline __attribute__((always_inline))
-SEC("helpers")
+BCC_SEC("helpers")
 void * bpf_map_lookup_elem_(uintptr_t map, void *key) {
   return bpf_map_lookup_elem((void *)map, key);
 }
 
 static inline __attribute__((always_inline))
-SEC("helpers")
+BCC_SEC("helpers")
 int bpf_map_update_elem_(uintptr_t map, void *key, void *value, u64 flags) {
   return bpf_map_update_elem((void *)map, key, value, flags);
 }
 
 static inline __attribute__((always_inline))
-SEC("helpers")
+BCC_SEC("helpers")
 int bpf_map_delete_elem_(uintptr_t map, void *key) {
   return bpf_map_delete_elem((void *)map, key);
 }
 
 static inline __attribute__((always_inline))
-SEC("helpers")
+BCC_SEC("helpers")
 int bpf_l3_csum_replace_(void *ctx, u64 off, u64 from, u64 to, u64 flags) {
   switch (flags & 0xf) {
     case 2:
@@ -675,7 +729,7 @@ int bpf_l3_csum_replace_(void *ctx, u64 off, u64 from, u64 to, u64 flags) {
 }
 
 static inline __attribute__((always_inline))
-SEC("helpers")
+BCC_SEC("helpers")
 int bpf_l4_csum_replace_(void *ctx, u64 off, u64 from, u64 to, u64 flags) {
   switch (flags & 0xf) {
     case 2:

@@ -1,9 +1,14 @@
-#!/usr/bin/env python
+#!/usr/bin/python
 #
 # bashreadline  Print entered bash commands from all running shells.
 #               For Linux, uses BCC, eBPF. Embedded C.
 #
+# USAGE: bashreadline [-s SHARED]
 # This works by tracing the readline() function using a uretprobe (uprobes).
+# When you failed to run the script directly with error:
+# `Exception: could not determine address of symbol b'readline'`,
+# you may need specify the location of libreadline.so library
+# with `-s` option.
 #
 # Copyright 2016 Netflix, Inc.
 # Licensed under the Apache License, Version 2.0 (the "License")
@@ -14,7 +19,18 @@
 from __future__ import print_function
 from bcc import BPF
 from time import strftime
-import ctypes as ct
+import argparse
+
+parser = argparse.ArgumentParser(
+        description="Print entered bash commands from all running shells",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+parser.add_argument("-s", "--shared", nargs="?",
+        const="/lib/libreadline.so", type=str,
+        help="specify the location of libreadline.so library.\
+              Default is /lib/libreadline.so")
+args = parser.parse_args()
+
+name = args.shared if args.shared else "/bin/bash"
 
 # load BPF program
 bpf_text = """
@@ -40,22 +56,15 @@ int printret(struct pt_regs *ctx) {
     return 0;
 };
 """
-STR_DATA = 80
-
-class Data(ct.Structure):
-    _fields_ = [
-        ("pid", ct.c_ulonglong),
-        ("str", ct.c_char * STR_DATA)
-    ]
 
 b = BPF(text=bpf_text)
-b.attach_uretprobe(name="/bin/bash", sym="readline", fn_name="printret")
+b.attach_uretprobe(name=name, sym="readline", fn_name="printret")
 
 # header
 print("%-9s %-6s %s" % ("TIME", "PID", "COMMAND"))
 
 def print_event(cpu, data, size):
-    event = ct.cast(data, ct.POINTER(Data)).contents
+    event = b["events"].event(data)
     print("%-9s %-6d %s" % (strftime("%H:%M:%S"), event.pid,
                             event.str.decode('utf-8', 'replace')))
 

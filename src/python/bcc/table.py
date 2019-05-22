@@ -18,6 +18,7 @@ from functools import reduce
 import multiprocessing
 import os
 import errno
+import re
 
 from .libbcc import lib, _RAW_CB_TYPE, _LOST_CB_TYPE
 from .perf import Perf
@@ -43,6 +44,25 @@ BPF_MAP_TYPE_SOCKMAP = 15
 BPF_MAP_TYPE_CPUMAP = 16
 BPF_MAP_TYPE_XSKMAP = 17
 BPF_MAP_TYPE_SOCKHASH = 18
+
+map_type_name = {BPF_MAP_TYPE_HASH: "HASH",
+                 BPF_MAP_TYPE_ARRAY: "ARRAY",
+                 BPF_MAP_TYPE_PROG_ARRAY: "PROG_ARRAY",
+                 BPF_MAP_TYPE_PERF_EVENT_ARRAY: "PERF_EVENT_ARRAY",
+                 BPF_MAP_TYPE_PERCPU_HASH: "PERCPU_HASH",
+                 BPF_MAP_TYPE_PERCPU_ARRAY: "PERCPU_ARRAY",
+                 BPF_MAP_TYPE_STACK_TRACE: "STACK_TRACE",
+                 BPF_MAP_TYPE_CGROUP_ARRAY: "CGROUP_ARRAY",
+                 BPF_MAP_TYPE_LRU_HASH: "LRU_HASH",
+                 BPF_MAP_TYPE_LRU_PERCPU_HASH: "LRU_PERCPU_HASH",
+                 BPF_MAP_TYPE_LPM_TRIE: "LPM_TRIE",
+                 BPF_MAP_TYPE_ARRAY_OF_MAPS: "ARRAY_OF_MAPS",
+                 BPF_MAP_TYPE_HASH_OF_MAPS: "HASH_OF_MAPS",
+                 BPF_MAP_TYPE_DEVMAP: "DEVMAP",
+                 BPF_MAP_TYPE_SOCKMAP: "SOCKMAP",
+                 BPF_MAP_TYPE_CPUMAP: "CPUMAP",
+                 BPF_MAP_TYPE_XSKMAP: "XSKMAP",
+                 BPF_MAP_TYPE_SOCKHASH: "SOCKHASH",}
 
 stars_max = 40
 log2_index_max = 65
@@ -122,7 +142,14 @@ def _print_linear_hist(vals, val_type):
                       _stars(val, val_max, stars)))
 
 
-def Table(bpf, map_id, map_fd, keytype, leaftype, **kwargs):
+def get_table_type_name(ttype):
+    try:
+        return map_type_name[ttype]
+    except KeyError:
+        return "<unknown>"
+
+
+def Table(bpf, map_id, map_fd, keytype, leaftype, name, **kwargs):
     """Table(bpf, map_id, map_fd, keytype, leaftype, **kwargs)
 
     Create a python object out of a reference to a bpf table handle"""
@@ -136,7 +163,7 @@ def Table(bpf, map_id, map_fd, keytype, leaftype, **kwargs):
     elif ttype == BPF_MAP_TYPE_PROG_ARRAY:
         t = ProgArray(bpf, map_id, map_fd, keytype, leaftype)
     elif ttype == BPF_MAP_TYPE_PERF_EVENT_ARRAY:
-        t = PerfEventArray(bpf, map_id, map_fd, keytype, leaftype)
+        t = PerfEventArray(bpf, map_id, map_fd, keytype, leaftype, name)
     elif ttype == BPF_MAP_TYPE_PERCPU_HASH:
         t = PerCpuHash(bpf, map_id, map_fd, keytype, leaftype, **kwargs)
     elif ttype == BPF_MAP_TYPE_PERCPU_ARRAY:
@@ -162,7 +189,7 @@ def Table(bpf, map_id, map_fd, keytype, leaftype, **kwargs):
 
 class TableBase(MutableMapping):
 
-    def __init__(self, bpf, map_id, map_fd, keytype, leaftype):
+    def __init__(self, bpf, map_id, map_fd, keytype, leaftype, name=None):
         self.bpf = bpf
         self.map_id = map_id
         self.map_fd = map_fd
@@ -171,6 +198,7 @@ class TableBase(MutableMapping):
         self.ttype = lib.bpf_table_type_id(self.bpf.module, self.map_id)
         self.flags = lib.bpf_table_flags_id(self.bpf.module, self.map_id)
         self._cbs = {}
+        self._name = name
 
     def key_sprintf(self, key):
         buf = ct.create_string_buffer(ct.sizeof(self.Key) * 8)
@@ -317,6 +345,15 @@ class TableBase(MutableMapping):
             tmp = {}
             f1 = self.Key._fields_[0][0]
             f2 = self.Key._fields_[1][0]
+
+            # The above code assumes that self.Key._fields_[1][0] holds the
+            # slot. But a padding member may have been inserted here, which
+            # breaks the assumption and leads to chaos.
+            # TODO: this is a quick fix. Fixing/working around in the BCC
+            # internal library is the right thing to do.
+            if f2 == '__pad_1' and len(self.Key._fields_) == 3:
+                f2 = self.Key._fields_[2][0]
+
             for k, v in self.items():
                 bucket = getattr(k, f1)
                 if bucket_fn:
@@ -528,6 +565,7 @@ class PerfEventArray(ArrayBase):
     def __init__(self, *args, **kwargs):
         super(PerfEventArray, self).__init__(*args, **kwargs)
         self._open_key_fds = {}
+        self._event_class = None
 
     def __del__(self):
         keys = list(self._open_key_fds.keys())
@@ -549,6 +587,72 @@ class PerfEventArray(ArrayBase):
             # The key is opened for perf event read
             lib.bpf_close_perf_event_fd(self._open_key_fds[key])
         del self._open_key_fds[key]
+
+    def _get_event_class(self):
+        ct_mapping = { 'char'              : ct.c_char,
+                       's8'                : ct.c_char,
+                       'unsigned char'     : ct.c_ubyte,
+                       'u8'                : ct.c_ubyte,
+                       'u8 *'              : ct.c_char_p,
+                       'char *'            : ct.c_char_p,
+                       'short'             : ct.c_short,
+                       's16'               : ct.c_short,
+                       'unsigned short'    : ct.c_ushort,
+                       'u16'               : ct.c_ushort,
+                       'int'               : ct.c_int,
+                       's32'               : ct.c_int,
+                       'enum'              : ct.c_int,
+                       'unsigned int'      : ct.c_uint,
+                       'u32'               : ct.c_uint,
+                       'long'              : ct.c_long,
+                       'unsigned long'     : ct.c_ulong,
+                       'long long'         : ct.c_longlong,
+                       's64'               : ct.c_longlong,
+                       'unsigned long long': ct.c_ulonglong,
+                       'u64'               : ct.c_ulonglong,
+                       '__int128'          : (ct.c_longlong * 2),
+                       'unsigned __int128' : (ct.c_ulonglong * 2),
+                       'void *'            : ct.c_void_p }
+
+        # handle array types e.g. "int [16] foo"
+        array_type = re.compile(r"(.+) \[([0-9]+)\]$")
+
+        fields = []
+        num_fields = lib.bpf_perf_event_fields(self.bpf.module, self._name)
+        i = 0
+        while i < num_fields:
+            field = lib.bpf_perf_event_field(self.bpf.module, self._name, i).decode()
+            m = re.match(r"(.*)#(.*)", field)
+            field_name = m.group(1)
+            field_type = m.group(2)
+
+            if re.match(r"enum .*", field_type):
+                field_type = "enum"
+
+            m = array_type.match(field_type)
+            try:
+                if m:
+                    fields.append((field_name, ct_mapping[m.group(1)] * int(m.group(2))))
+                else:
+                    fields.append((field_name, ct_mapping[field_type]))
+            except KeyError:
+                print("Type: '%s' not recognized. Please define the data with ctypes manually."
+                      % field_type)
+                exit()
+            i += 1
+        return type('', (ct.Structure,), {'_fields_': fields})
+
+    def event(self, data):
+        """event(data)
+
+        When ring buffers are opened to receive custom perf event,
+        the underlying event data struct which is defined in C in
+        the BPF program can be deduced via this function. This avoids
+        redundant definitions in Python.
+        """
+        if self._event_class == None:
+            self._event_class = self._get_event_class()
+        return ct.cast(data, ct.POINTER(self._event_class)).contents
 
     def open_perf_buffer(self, callback, page_cnt=8, lost_cb=None):
         """open_perf_buffers(callback)
@@ -736,15 +840,20 @@ class LpmTrie(TableBase):
 
 class StackTrace(TableBase):
     MAX_DEPTH = 127
+    BPF_F_STACK_BUILD_ID = (1<<5)
+    BPF_STACK_BUILD_ID_EMPTY =  0 #can't get stacktrace
+    BPF_STACK_BUILD_ID_VALID = 1 #valid build-id,ip
+    BPF_STACK_BUILD_ID_IP = 2 #fallback to ip
 
     def __init__(self, *args, **kwargs):
         super(StackTrace, self).__init__(*args, **kwargs)
 
     class StackWalker(object):
-        def __init__(self, stack, resolve=None):
+        def __init__(self, stack, flags, resolve=None):
             self.stack = stack
             self.n = -1
             self.resolve = resolve
+            self.flags = flags
 
         def __iter__(self):
             return self
@@ -757,14 +866,21 @@ class StackTrace(TableBase):
             if self.n == StackTrace.MAX_DEPTH:
                 raise StopIteration()
 
-            addr = self.stack.ip[self.n]
+            if self.flags & StackTrace.BPF_F_STACK_BUILD_ID:
+              addr = self.stack.trace[self.n]
+              if addr.status == StackTrace.BPF_STACK_BUILD_ID_IP or \
+                 addr.status == StackTrace.BPF_STACK_BUILD_ID_EMPTY:
+                  raise StopIteration()
+            else:
+              addr = self.stack.ip[self.n]
+
             if addr == 0 :
                 raise StopIteration()
 
             return self.resolve(addr) if self.resolve else addr
 
     def walk(self, stack_id, resolve=None):
-        return StackTrace.StackWalker(self[self.Key(stack_id)], resolve)
+        return StackTrace.StackWalker(self[self.Key(stack_id)], self.flags, resolve)
 
     def __len__(self):
         i = 0

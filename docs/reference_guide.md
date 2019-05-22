@@ -15,6 +15,7 @@ This guide is incomplete. If something feels missing, check the bcc and kernel s
         - [5. uretprobes](#5-uretprobes)
         - [6. USDT probes](#6-usdt-probes)
         - [7. Raw Tracepoints](#7-raw-tracepoints)
+        - [8. system call tracepoints](#8-system-call-tracepoints)
     - [Data](#data)
         - [1. bpf_probe_read()](#1-bpf_probe_read)
         - [2. bpf_probe_read_str()](#2-bpf_probe_read_str)
@@ -23,7 +24,7 @@ This guide is incomplete. If something feels missing, check the bcc and kernel s
         - [5. bpf_get_current_uid_gid()](#5-bpf_get_current_uid_gid)
         - [6. bpf_get_current_comm()](#6-bpf_get_current_comm)
         - [7. bpf_get_current_task()](#7-bpf_get_current_task)
-        - [8. bpf_log2l()](#8-bpflog2l)
+        - [8. bpf_log2l()](#8-bpf_log2l)
         - [9. bpf_get_prandom_u32()](#9-bpf_get_prandom_u32)
     - [Debugging](#debugging)
         - [1. bpf_override_return()](#1-bpf_override_return)
@@ -277,6 +278,40 @@ This instruments the sched:sched_switch tracepoint, and prints the prev and next
 Examples in situ:
 [search /tools](https://github.com/iovisor/bcc/search?q=RAW_TRACEPOINT_PROBE+path%3Atools&type=Code)
 
+### 8. system call tracepoints
+
+Syntax: ```syscall__SYSCALLNAME```
+
+```syscall__``` is a special prefix that creates a kprobe for the system call name provided as the remainder. You can use it by declaring a normal C function, then using the Python ```BPF.get_syscall_name(SYSCALLNAME)``` and ```BPF.attach_kprobe()``` to associate it.
+
+Arguments are specified on the function declaration: ```syscall__SYSCALLNAME(struct pt_regs *ctx, [, argument1 ...])```.
+
+For example:
+```C
+int syscall__execve(struct pt_regs *ctx,
+    const char __user *filename,
+    const char __user *const __user *__argv,
+    const char __user *const __user *__envp)
+{
+    [...]
+}
+```
+
+This instruments the execve system call.
+
+The first argument is always ```struct pt_regs *```, the remainder are the arguments to the function (they don't need to be specified, if you don't intend to use them).
+
+Corresponding Python code:
+```Python
+b = BPF(text=bpf_text)
+execve_fnname = b.get_syscall_name("execve")
+b.attach_kprobe(event=execve_fnname, fn_name="syscall__execve")
+```
+
+Examples in situ:
+[code](https://github.com/iovisor/bcc/blob/552658edda09298afdccc8a4b5e17311a2d8a771/tools/execsnoop.py#L101) ([output](https://github.com/iovisor/bcc/blob/552658edda09298afdccc8a4b5e17311a2d8a771/tools/execsnoop_example.txt#L8))
+
+
 ## Data
 
 ### 1. bpf_probe_read()
@@ -417,7 +452,7 @@ This is used for targeted error injection.
 
 bpf_override_return will only work when the kprobed function is whitelisted to
 allow error injections. Whitelisting entails tagging a function with
-`BPF_ALLOW_ERROR_INJECTION()` in the kernel source tree; see `io_ctl_init` for
+`ALLOW_ERROR_INJECTION()` in the kernel source tree; see `io_ctl_init` for
 an example. If the kprobed function is not whitelisted, the bpf program will
 fail to attach with ` ioctl(PERF_EVENT_IOC_SET_BPF): Invalid argument`
 
@@ -485,6 +520,8 @@ Syntax: ```int perf_submit((void *)ctx, (void *)data, u32 data_size)```
 Return: 0 on success
 
 A method of a BPF_PERF_OUTPUT table, for submitting custom event data to user space. See the BPF_PERF_OUTPUT entry. (This ultimately calls bpf_perf_event_output().)
+
+The ```ctx``` parameter is provided in [kprobes](#1-kprobes) or [kretprobes](#2-kretprobes). For ```SCHED_CLS``` or ```SOCKET_FILTER``` programs, the ```struct __sk_buff *skb``` must be used instead.
 
 Examples in situ:
 [search /examples](https://github.com/iovisor/bcc/search?q=perf_submit+path%3Aexamples&type=Code),
@@ -752,7 +789,8 @@ Syntax: ```map.insert(&key, &val)```
 Associate the value in the second argument to the key, only if there was no previous value.
 
 Examples in situ:
-[search /examples](https://github.com/iovisor/bcc/search?q=insert+path%3Aexamples&type=Code)
+[search /examples](https://github.com/iovisor/bcc/search?q=insert+path%3Aexamples&type=Code),
+[search /tools](https://github.com/iovisor/bcc/search?q=insert+path%3Atools&type=Code)
 
 ### 17. map.increment()
 
@@ -986,7 +1024,7 @@ Examples in situ:
 
 ### 2. attach_kretprobe()
 
-Syntax: ```BPF.attach_kretprobe(event="event", fn_name="name")```
+Syntax: ```BPF.attach_kretprobe(event="event", fn_name="name" [, maxactive=int])```
 
 Instruments the return of the kernel function ```event()``` using kernel dynamic tracing of the function return, and attaches our C defined function ```name()``` to be called when the kernel function returns.
 
@@ -999,6 +1037,8 @@ b.attach_kretprobe(event="vfs_read", fn_name="do_return")
 This will instrument the kernel ```vfs_read()``` function, which will then run our BPF defined ```do_return()``` function each time it is called.
 
 You can call attach_kretprobe() more than once, and attach your BPF function to multiple kernel function returns.
+
+When a kretprobe is installed on a kernel function, there is a limit on how many parallel calls it can catch. You can change that limit with ```maxactive```. See the kprobes documentation for its default value.
 
 See the previous kretprobes section for how to instrument the return value from BPF.
 
@@ -1043,7 +1083,9 @@ b.attach_tracepoint("random:urandom_read", "printarg")
 Notice how the first argument to ```printarg()``` is now our defined struct.
 
 Examples in situ:
-[code](https://github.com/iovisor/bcc/blob/a4159da8c4ea8a05a3c6e402451f530d6e5a8b41/examples/tracing/urandomread-explicit.py#L41)
+[code](https://github.com/iovisor/bcc/blob/a4159da8c4ea8a05a3c6e402451f530d6e5a8b41/examples/tracing/urandomread-explicit.py#L41),
+[search /examples](https://github.com/iovisor/bcc/search?q=attach_tracepoint+path%3Aexamples+language%3Apython&type=Code),
+[search /tools](https://github.com/iovisor/bcc/search?q=attach_tracepoint+path%3Atools+language%3Apython&type=Code)
 
 ### 4. attach_uprobe()
 
@@ -1190,8 +1232,8 @@ while 1:
 ```
 
 Examples in situ:
-[search /examples](https://github.com/iovisor/bcc/search?q=trace_print+path%3Aexamples+language%3Apython&type=Code),
-[search /tools](https://github.com/iovisor/bcc/search?q=trace_print+path%3Atools+language%3Apython&type=Code)
+[search /examples](https://github.com/iovisor/bcc/search?q=trace_fields+path%3Aexamples+language%3Apython&type=Code),
+[search /tools](https://github.com/iovisor/bcc/search?q=trace_fields+path%3Atools+language%3Apython&type=Code)
 
 ## Output
 
@@ -1202,9 +1244,11 @@ Normal output from a BPF program is either:
 
 ### 1. perf_buffer_poll()
 
-Syntax: ```BPF.perf_buffer_poll()```
+Syntax: ```BPF.perf_buffer_poll(timeout=T)```
 
 This polls from all open perf ring buffers, calling the callback function that was provided when calling open_perf_buffer for each entry.
+
+The timeout parameter is optional and measured in milliseconds. In its absence, polling continues indefinitely.
 
 Example:
 
@@ -1212,11 +1256,14 @@ Example:
 # loop with callback to print_event
 b["events"].open_perf_buffer(print_event)
 while 1:
-    b.perf_buffer_poll()
+    try:
+        b.perf_buffer_poll()
+    except KeyboardInterrupt:
+        exit();
 ```
 
 Examples in situ:
-[code](https://github.com/iovisor/bcc/blob/08fbceb7e828f0e3e77688497727c5b2405905fd/examples/tracing/hello_perf_output.py#L61),
+[code](https://github.com/iovisor/bcc/blob/v0.9.0/examples/tracing/hello_perf_output.py#L55),
 [search /examples](https://github.com/iovisor/bcc/search?q=perf_buffer_poll+path%3Aexamples+language%3Apython&type=Code),
 [search /tools](https://github.com/iovisor/bcc/search?q=perf_buffer_poll+path%3Atools+language%3Apython&type=Code)
 
@@ -1257,10 +1304,13 @@ def print_event(cpu, data, size):
 # loop with callback to print_event
 b["events"].open_perf_buffer(print_event)
 while 1:
-    b.perf_buffer_poll()
+    try:
+        b.perf_buffer_poll()
+    except KeyboardInterrupt:
+        exit()
 ```
 
-Note that the data structure transferred will need to be declared in C in the BPF program, and in Python. For example:
+Note that the data structure transferred will need to be declared in C in the BPF program. For example:
 
 ```C
 // define output data structure in C
@@ -1269,7 +1319,19 @@ struct data_t {
     u64 ts;
     char comm[TASK_COMM_LEN];
 };
+BPF_PERF_OUTPUT(events);
+[...]
 ```
+
+In Python, you can either let bcc generate the data structure from C declaration automatically (recommanded):
+
+```Python
+def print_event(cpu, data, size):
+    event = b["events"].event(data)
+[...]
+```
+
+or define it manually:
 
 ```Python
 # define output data structure in Python
@@ -1278,12 +1340,14 @@ class Data(ct.Structure):
     _fields_ = [("pid", ct.c_ulonglong),
                 ("ts", ct.c_ulonglong),
                 ("comm", ct.c_char * TASK_COMM_LEN)]
+
+def print_event(cpu, data, size):
+    event = ct.cast(data, ct.POINTER(Data)).contents
+[...]
 ```
 
-Perhaps in a future bcc version, the Python data structure will be automatically generated from the C declaration.
-
 Examples in situ:
-[code](https://github.com/iovisor/bcc/blob/08fbceb7e828f0e3e77688497727c5b2405905fd/examples/tracing/hello_perf_output.py#L59),
+[code](https://github.com/iovisor/bcc/blob/v0.9.0/examples/tracing/hello_perf_output.py#L52),
 [search /examples](https://github.com/iovisor/bcc/search?q=open_perf_buffer+path%3Aexamples+language%3Apython&type=Code),
 [search /tools](https://github.com/iovisor/bcc/search?q=open_perf_buffer+path%3Atools+language%3Apython&type=Code)
 
@@ -1306,8 +1370,8 @@ for k, v in sorted(counts.items(), key=lambda counts: counts[1].value):
 This example also uses the ```sorted()``` method to sort by value.
 
 Examples in situ:
-[search /examples](https://github.com/iovisor/bcc/search?q=clear+items%3Aexamples+language%3Apython&type=Code),
-[search /tools](https://github.com/iovisor/bcc/search?q=clear+items%3Atools+language%3Apython&type=Code)
+[search /examples](https://github.com/iovisor/bcc/search?q=items+path%3Aexamples+language%3Apython&type=Code),
+[search /tools](https://github.com/iovisor/bcc/search?q=items+path%3Atools+language%3Apython&type=Code)
 
 ### 4. values()
 

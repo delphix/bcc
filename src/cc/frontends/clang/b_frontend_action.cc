@@ -766,7 +766,7 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
             return false;
           }
         }
-        string fd = to_string(desc->second.fd);
+        string fd = to_string(desc->second.fd >= 0 ? desc->second.fd : desc->second.fake_fd);
         string prefix, suffix;
         string txt;
         auto rewrite_start = GET_BEGINLOC(Call);
@@ -813,6 +813,23 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
                                                            GET_ENDLOC(Call->getArg(2)))));
           txt = "bpf_perf_event_output(" + arg0 + ", bpf_pseudo_fd(1, " + fd + ")";
           txt += ", CUR_CPU_IDENTIFIER, " + args_other + ")";
+
+          // e.g.
+          // struct data_t { u32 pid; }; data_t data;
+          // events.perf_submit(ctx, &data, sizeof(data));
+          // ...
+          //                       &data   ->     data    ->  typeof(data)        ->   data_t
+          auto type_arg1 = Call->getArg(1)->IgnoreCasts()->getType().getTypePtr()->getPointeeType().getTypePtr();
+          if (type_arg1->isStructureType()) {
+            auto event_type = type_arg1->getAsTagDecl();
+            const auto *r = dyn_cast<RecordDecl>(event_type);
+            std::vector<std::string> perf_event;
+
+            for (auto it = r->field_begin(); it != r->field_end(); ++it) {
+              perf_event.push_back(it->getNameAsString() + "#" + it->getType().getAsString()); //"pid#u32"
+            }
+            fe_.perf_events_[name] = perf_event;
+          }
         } else if (memb_name == "perf_submit_skb") {
           string skb = rewriter_.getRewrittenText(expansionRange(Call->getArg(0)->getSourceRange()));
           string skb_len = rewriter_.getRewrittenText(expansionRange(Call->getArg(1)->getSourceRange()));
@@ -1230,14 +1247,10 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
       }
 
       table.type = map_type;
-      table.fd = bpf_create_map(map_type, table.name.c_str(),
-                                table.key_size, table.leaf_size,
-                                table.max_entries, table.flags);
-    }
-    if (table.fd < 0) {
-      error(GET_BEGINLOC(Decl), "could not open bpf map: %0\nis %1 map type enabled in your kernel?") <<
-          strerror(errno) << A->getName();
-      return false;
+      table.fake_fd = fe_.get_next_fake_fd();
+      fe_.add_map_def(table.fake_fd, std::make_tuple((int)map_type, std::string(table.name),
+                      (int)table.key_size, (int)table.leaf_size,
+                      (int)table.max_entries, table.flags));
     }
 
     if (!table.is_extern)
@@ -1351,7 +1364,9 @@ BFrontendAction::BFrontendAction(llvm::raw_ostream &os, unsigned flags,
                                  TableStorage &ts, const std::string &id,
                                  const std::string &main_path,
                                  FuncSource &func_src, std::string &mod_src,
-                                 const std::string &maps_ns)
+                                 const std::string &maps_ns,
+                                 fake_fd_map_def &fake_fd_map,
+                                 std::map<std::string, std::vector<std::string>> &perf_events)
     : os_(os),
       flags_(flags),
       ts_(ts),
@@ -1360,7 +1375,10 @@ BFrontendAction::BFrontendAction(llvm::raw_ostream &os, unsigned flags,
       rewriter_(new Rewriter),
       main_path_(main_path),
       func_src_(func_src),
-      mod_src_(mod_src) {}
+      mod_src_(mod_src),
+      next_fake_fd_(-1),
+      fake_fd_map_(fake_fd_map),
+      perf_events_(perf_events) {}
 
 bool BFrontendAction::is_rewritable_ext_func(FunctionDecl *D) {
   StringRef file_name = rewriter_->getSourceMgr().getFilename(GET_BEGINLOC(D));
@@ -1399,11 +1417,17 @@ void BFrontendAction::EndSourceFileAction() {
 
   if (flags_ & DEBUG_PREPROCESSOR)
     rewriter_->getEditBuffer(rewriter_->getSourceMgr().getMainFileID()).write(llvm::errs());
+#if LLVM_MAJOR_VERSION >= 9
+  llvm::raw_string_ostream tmp_os(mod_src_);
+  rewriter_->getEditBuffer(rewriter_->getSourceMgr().getMainFileID())
+      .write(tmp_os);
+#else
   if (flags_ & DEBUG_SOURCE) {
     llvm::raw_string_ostream tmp_os(mod_src_);
     rewriter_->getEditBuffer(rewriter_->getSourceMgr().getMainFileID())
         .write(tmp_os);
   }
+#endif
 
   for (auto func : func_range_) {
     auto f = func.first;

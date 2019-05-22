@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/python
 #
 # stacksnoop    Trace a kernel function and print all kernel stack traces.
 #               For Linux, uses BCC, eBPF, and currently x86_64 only. Inline C.
@@ -120,4 +120,7 @@ def print_event(cpu, data, size):
 
 b["events"].open_perf_buffer(print_event)
 while 1:
-    b.perf_buffer_poll()
+    try:
+        b.perf_buffer_poll()
+    except KeyboardInterrupt:
+        exit()

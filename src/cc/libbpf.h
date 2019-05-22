@@ -18,7 +18,8 @@
 #ifndef LIBBPF_H
 #define LIBBPF_H
 
-#include "compat/linux/bpf.h"
+#include "linux/bpf.h"
+#include <stdbool.h>
 #include <stdint.h>
 #include <sys/types.h>
 
@@ -26,14 +27,18 @@
 extern "C" {
 #endif
 
+struct bpf_create_map_attr;
+struct bpf_load_program_attr;
+
 enum bpf_probe_attach_type {
 	BPF_PROBE_ENTRY,
 	BPF_PROBE_RETURN
 };
 
-int bpf_create_map(enum bpf_map_type map_type, const char *name,
+int bcc_create_map(enum bpf_map_type map_type, const char *name,
                    int key_size, int value_size, int max_entries,
                    int map_flags);
+int bcc_create_map_xattr(struct bpf_create_map_attr *attr, bool allow_rlimit);
 int bpf_update_elem(int fd, void *key, void *value, unsigned long long flags);
 int bpf_lookup_elem(int fd, void *key, void *value);
 int bpf_delete_elem(int fd, void *key);
@@ -56,10 +61,13 @@ int bpf_get_next_key(int fd, void *key, void *next_key);
  *     printing, and continue to attempt increase that allocated buffer size if
  *     initial attemp was insufficient in size.
  */
-int bpf_prog_load(enum bpf_prog_type prog_type, const char *name,
-                  const struct bpf_insn *insns, int insn_len,
+int bcc_prog_load(enum bpf_prog_type prog_type, const char *name,
+                  const struct bpf_insn *insns, int prog_len,
                   const char *license, unsigned kern_version,
                   int log_level, char *log_buf, unsigned log_buf_size);
+int bcc_prog_load_xattr(struct bpf_load_program_attr *attr,
+                        int prog_len, char *log_buf,
+                        unsigned log_buf_size, bool allow_rlimit);
 
 int bpf_attach_socket(int sockfd, int progfd);
 
@@ -71,7 +79,8 @@ typedef void (*perf_reader_raw_cb)(void *cb_cookie, void *raw, int raw_size);
 typedef void (*perf_reader_lost_cb)(void *cb_cookie, uint64_t lost);
 
 int bpf_attach_kprobe(int progfd, enum bpf_probe_attach_type attach_type,
-                      const char *ev_name, const char *fn_name, uint64_t fn_offset);
+                      const char *ev_name, const char *fn_name, uint64_t fn_offset,
+                      int maxactive);
 int bpf_detach_kprobe(const char *ev_name);
 
 int bpf_attach_uprobe(int progfd, enum bpf_probe_attach_type attach_type,

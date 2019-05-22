@@ -40,6 +40,8 @@ Location::Location(uint64_t addr, const std::string &bin_path, const char *arg_f
   ArgumentParser_aarch64 parser(arg_fmt);
 #elif __powerpc64__
   ArgumentParser_powerpc64 parser(arg_fmt);
+#elif __s390x__
+  ArgumentParser_s390x parser(arg_fmt);
 #else
   ArgumentParser_x64 parser(arg_fmt);
 #endif
@@ -293,19 +295,23 @@ Probe *Context::get(const std::string &provider_name,
 
 bool Context::enable_probe(const std::string &probe_name,
                            const std::string &fn_name) {
+  return enable_probe("", probe_name, fn_name);
+}
+
+bool Context::enable_probe(const std::string &provider_name,
+                           const std::string &probe_name,
+                           const std::string &fn_name) {
   if (pid_stat_ && pid_stat_->is_stale())
     return false;
 
-  // FIXME: we may have issues here if the context has two same probes's
-  // but different providers. For example, libc:setjmp and rtld:setjmp,
-  // libc:lll_futex_wait and rtld:lll_futex_wait.
   Probe *found_probe = nullptr;
   for (auto &p : probes_) {
-    if (p->name_ == probe_name) {
+    if (p->name_ == probe_name &&
+        (provider_name.empty() || p->provider() == provider_name)) {
       if (found_probe != nullptr) {
-         fprintf(stderr, "Two same-name probes (%s) but different providers\n",
-                 probe_name.c_str());
-         return false;
+        fprintf(stderr, "Two same-name probes (%s) but different providers\n",
+                probe_name.c_str());
+        return false;
       }
       found_probe = p.get();
     }
@@ -373,7 +379,12 @@ Context::Context(int pid, const std::string &bin_path)
       mount_ns_instance_(new ProcMountNS(pid)), loaded_(false) {
   std::string full_path = resolve_bin_path(bin_path);
   if (!full_path.empty()) {
-    if (bcc_elf_foreach_usdt(full_path.c_str(), _each_probe, this) == 0) {
+    int res;
+    {
+      ProcMountNSGuard g(mount_ns_instance_.get());
+      res = bcc_elf_foreach_usdt(full_path.c_str(), _each_probe, this);
+    }
+    if (res == 0) {
       cmd_bin_path_ = ebpf::get_pid_exe(pid);
       if (cmd_bin_path_.empty())
         return;
@@ -399,13 +410,16 @@ void *bcc_usdt_new_frompid(int pid, const char *path) {
   if (!path) {
     ctx = new USDT::Context(pid);
   } else {
-    struct stat buffer;
-    if (strlen(path) >= 1 && path[0] != '/') {
-      fprintf(stderr, "HINT: Binary path should be absolute.\n\n");
-      return nullptr;
-    } else if (stat(path, &buffer) == -1) {
-      fprintf(stderr, "HINT: Specified binary doesn't exist.\n\n");
-      return nullptr;
+    {
+      ProcMountNSGuard g(new ProcMountNS(pid));
+      struct stat buffer;
+      if (strlen(path) >= 1 && path[0] != '/') {
+        fprintf(stderr, "HINT: Binary path should be absolute.\n\n");
+        return nullptr;
+      } else if (stat(path, &buffer) == -1) {
+        fprintf(stderr, "HINT: Specified binary doesn't exist.\n\n");
+        return nullptr;
+      }
     }
     ctx = new USDT::Context(pid, path);
   }
@@ -436,6 +450,13 @@ int bcc_usdt_enable_probe(void *usdt, const char *probe_name,
                           const char *fn_name) {
   USDT::Context *ctx = static_cast<USDT::Context *>(usdt);
   return ctx->enable_probe(probe_name, fn_name) ? 0 : -1;
+}
+
+int bcc_usdt_enable_fully_specified_probe(void *usdt, const char *provider_name,
+                                          const char *probe_name,
+                                          const char *fn_name) {
+  USDT::Context *ctx = static_cast<USDT::Context *>(usdt);
+  return ctx->enable_probe(provider_name, probe_name, fn_name) ? 0 : -1;
 }
 
 const char *bcc_usdt_genargs(void **usdt_array, int len) {

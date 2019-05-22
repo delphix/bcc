@@ -121,7 +121,7 @@ function Bpf:initialize(args)
 
   if args.text then
     log.info("\n%s\n", args.text)
-    self.module = libbcc.bpf_module_create_c_from_string(args.text, llvm_debug, cflags_ary, #cflags)
+    self.module = libbcc.bpf_module_create_c_from_string(args.text, llvm_debug, cflags_ary, #cflags, true)
   elseif args.src_file then
     local src = _find_file(Bpf.SCRIPT_ROOT, args.src_file)
 
@@ -129,7 +129,7 @@ function Bpf:initialize(args)
       local hdr = _find_file(Bpf.SCRIPT_ROOT, args.hdr_file)
       self.module = libbcc.bpf_module_create_b(src, hdr, llvm_debug)
     else
-      self.module = libbcc.bpf_module_create_c(src, llvm_debug, cflags_ary, #cflags)
+      self.module = libbcc.bpf_module_create_c(src, llvm_debug, cflags_ary, #cflags, true)
     end
   end
 
@@ -162,7 +162,7 @@ function Bpf:load_func(fn_name, prog_type)
   assert(libbcc.bpf_function_start(self.module, fn_name) ~= nil,
     "unknown program: "..fn_name)
 
-  local fd = libbcc.bpf_prog_load(prog_type,
+  local fd = libbcc.bcc_prog_load(prog_type,
     fn_name,
     libbcc.bpf_function_start(self.module, fn_name),
     libbcc.bpf_function_size(self.module, fn_name),
@@ -213,8 +213,9 @@ function Bpf:attach_kprobe(args)
   local ev_name = string.format("%s_%s", ptype, event:gsub("[%+%.]", "_"))
   local offset = args.fn_offset or 0
   local retprobe = args.retprobe and 1 or 0
+  local maxactive = args.maxactive or 0
 
-  local res = libbcc.bpf_attach_kprobe(fn.fd, retprobe, ev_name, event, offset)
+  local res = libbcc.bpf_attach_kprobe(fn.fd, retprobe, ev_name, event, offset, maxactive)
 
   assert(res >= 0, "failed to attach BPF to kprobe")
   self:probe_store("kprobe", ev_name, res)

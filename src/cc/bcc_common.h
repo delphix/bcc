@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-#ifndef BPF_COMMON_H
-#define BPF_COMMON_H
+#ifndef BCC_COMMON_H
+#define BCC_COMMON_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -25,8 +26,10 @@ extern "C" {
 #endif
 
 void * bpf_module_create_b(const char *filename, const char *proto_filename, unsigned flags);
-void * bpf_module_create_c(const char *filename, unsigned flags, const char *cflags[], int ncflags);
-void * bpf_module_create_c_from_string(const char *text, unsigned flags, const char *cflags[], int ncflags);
+void * bpf_module_create_c(const char *filename, unsigned flags, const char *cflags[], int ncflags,
+                           bool allow_rlimit);
+void * bpf_module_create_c_from_string(const char *text, unsigned flags, const char *cflags[],
+                                       int ncflags, bool allow_rlimit);
 void bpf_module_destroy(void *program);
 char * bpf_module_license(void *program);
 unsigned bpf_module_kern_version(void *program);
@@ -59,6 +62,14 @@ int bpf_table_key_snprintf(void *program, size_t id, char *buf, size_t buflen, c
 int bpf_table_leaf_snprintf(void *program, size_t id, char *buf, size_t buflen, const void *leaf);
 int bpf_table_key_sscanf(void *program, size_t id, const char *buf, void *key);
 int bpf_table_leaf_sscanf(void *program, size_t id, const char *buf, void *leaf);
+size_t bpf_perf_event_fields(void *program, const char *event);
+const char * bpf_perf_event_field(void *program, const char *event, size_t i);
+
+struct bpf_insn;
+int bcc_func_load(void *program, int prog_type, const char *name,
+                  const struct bpf_insn *insns, int prog_len,
+                  const char *license, unsigned kern_version,
+                  int log_level, char *log_buf, unsigned log_buf_size);
 
 #ifdef __cplusplus
 }

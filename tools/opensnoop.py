@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/python
 # @lint-avoid-python-3-compatibility-imports
 #
 # opensnoop Trace open() syscalls.
@@ -19,7 +19,6 @@ from __future__ import print_function
 from bcc import ArgString, BPF
 from bcc.utils import printb
 import argparse
-import ctypes as ct
 from datetime import datetime, timedelta
 import os
 
@@ -182,20 +181,6 @@ b = BPF(text=bpf_text)
 b.attach_kprobe(event="do_sys_open", fn_name="trace_entry")
 b.attach_kretprobe(event="do_sys_open", fn_name="trace_return")
 
-TASK_COMM_LEN = 16    # linux/sched.h
-NAME_MAX = 255        # linux/limits.h
-
-class Data(ct.Structure):
-    _fields_ = [
-        ("id", ct.c_ulonglong),
-        ("ts", ct.c_ulonglong),
-        ("uid", ct.c_uint32),
-        ("ret", ct.c_int),
-        ("comm", ct.c_char * TASK_COMM_LEN),
-        ("fname", ct.c_char * NAME_MAX),
-        ("flags", ct.c_int),
-    ]
-
 initial_ts = 0
 
 # header
@@ -211,7 +196,7 @@ print("PATH")
 
 # process event
 def print_event(cpu, data, size):
-    event = ct.cast(data, ct.POINTER(Data)).contents
+    event = b["events"].event(data)
     global initial_ts
 
     # split return value into FD and errno columns
@@ -233,17 +218,17 @@ def print_event(cpu, data, size):
 
     if args.timestamp:
         delta = event.ts - initial_ts
-        print("%-14.9f" % (float(delta) / 1000000), end="")
+        printb(b"%-14.9f" % (float(delta) / 1000000), nl="")
 
     if args.print_uid:
-        print("%-6d" % event.uid, end="")
+        printb(b"%-6d" % event.uid, nl="")
 
-    print("%-6d %-16s %4d %3d " %
-          (event.id & 0xffffffff if args.tid else event.id >> 32,
-           event.comm.decode('utf-8', 'replace'), fd_s, err), end="")
+    printb(b"%-6d %-16s %4d %3d " %
+           (event.id & 0xffffffff if args.tid else event.id >> 32,
+            event.comm, fd_s, err), nl="")
 
     if args.extended_fields:
-        print("%08o " % event.flags, end="")
+        printb(b"%08o " % event.flags, nl="")
 
     printb(b'%s' % event.fname)
 

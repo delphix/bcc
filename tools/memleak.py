@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/python
 #
 # memleak   Trace and display outstanding allocations to detect
 #           memory leaks in user-mode processes and the kernel.
@@ -100,6 +100,8 @@ parser.add_argument("-O", "--obj", type=str, default="c",
         help="attach to allocator functions in the specified object")
 parser.add_argument("--ebpf", action="store_true",
         help=argparse.SUPPRESS)
+parser.add_argument("--percpu", default=False, action="store_true",
+        help="trace percpu allocations")
 
 args = parser.parse_args()
 
@@ -139,10 +141,10 @@ struct combined_alloc_info_t {
 };
 
 BPF_HASH(sizes, u64);
-BPF_TABLE("hash", u64, struct alloc_info_t, allocs, 1000000);
+BPF_HASH(allocs, u64, struct alloc_info_t, 1000000);
 BPF_HASH(memptrs, u64, u64);
 BPF_STACK_TRACE(stack_traces, 10240);
-BPF_TABLE("hash", u64, struct combined_alloc_info_t, combined_allocs, 10240);
+BPF_HASH(combined_allocs, u64, struct combined_alloc_info_t, 10240);
 
 static inline void update_statistics_add(u64 stack_id, u64 sz) {
         struct combined_alloc_info_t *existing_cinfo;
@@ -365,8 +367,23 @@ TRACEPOINT_PROBE(kmem, mm_page_free) {
 }
 """
 
+bpf_source_percpu = """
+
+TRACEPOINT_PROBE(percpu, percpu_alloc_percpu) {
+        gen_alloc_enter((struct pt_regs *)args, args->size);
+        return gen_alloc_exit2((struct pt_regs *)args, (size_t)args->ptr);
+}
+
+TRACEPOINT_PROBE(percpu, percpu_free_percpu) {
+        return gen_free_enter((struct pt_regs *)args, (void *)args->ptr);
+}
+"""
+
 if kernel_trace:
-        bpf_source += bpf_source_kernel
+        if args.percpu:
+                bpf_source += bpf_source_percpu
+        else:
+                bpf_source += bpf_source_kernel
 
 bpf_source = bpf_source.replace("SHOULD_PRINT", "1" if trace_all else "0")
 bpf_source = bpf_source.replace("SAMPLE_EVERY_N", str(sample_every_n))
@@ -472,7 +489,8 @@ def print_outstanding():
                          key=lambda a: a.size)[-top_stacks:]
         for alloc in to_show:
                 print("\t%d bytes in %d allocations from stack\n\t\t%s" %
-                      (alloc.size, alloc.count, b"\n\t\t".join(alloc.stack)))
+                      (alloc.size, alloc.count,
+                       b"\n\t\t".join(alloc.stack).decode("ascii")))
 
 def print_outstanding_combined():
         stack_traces = bpf["stack_traces"]

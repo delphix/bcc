@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/python
 # @lint-avoid-python-3-compatibility-imports
 #
 # ucalls  Summarize method calls in high-level languages and/or system calls.
@@ -15,7 +15,8 @@
 from __future__ import print_function
 import argparse
 from time import sleep
-from bcc import BPF, USDT, utils, syscall_name
+from bcc import BPF, USDT, utils
+from bcc.syscall import syscall_name
 
 languages = ["java", "perl", "php", "python", "ruby", "tcl"]
 

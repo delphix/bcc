@@ -453,6 +453,21 @@ static int verify_checksum(const char *file, unsigned int crc) {
   return actual == crc;
 }
 
+// Check if two filenames point to the same file, including hard or soft links.
+static bool same_file(char *a, const char *b)
+{
+	struct stat stat_a, stat_b;
+
+	if (stat(a, &stat_a) || stat(b, &stat_b))
+		return false;
+
+	if ((stat_a.st_dev == stat_b.st_dev) &&
+	    (stat_a.st_ino == stat_b.st_ino))
+		return true;
+	else
+		return false;
+}
+
 static char *find_debug_via_debuglink(Elf *e, const char *binpath,
                                       int check_crc) {
   char fullpath[PATH_MAX];
@@ -473,7 +488,7 @@ static char *find_debug_via_debuglink(Elf *e, const char *binpath,
   // and it might contain poorer symbols (e.g. stripped or partial symbols)
   // than the external debuginfo that might be available elsewhere.
   snprintf(fullpath, sizeof(fullpath),"%s/%s", bindir, name);
-  if (strcmp(fullpath, binpath) != 0 && access(fullpath, F_OK) != -1) {
+  if (same_file(fullpath, binpath) != true && access(fullpath, F_OK) != -1) {
     res = strdup(fullpath);
     goto DONE;
   }
@@ -863,7 +878,7 @@ int bcc_free_memory() {
     int path_start = 0, path_end = 0;
     unsigned int devmajor, devminor;
     char perms[8];
-    if (sscanf(line, "%lx-%lx %7s %lx %u:%u %lu %n%*[^\n]%n",
+    if (sscanf(line, "%lx-%lx %7s %lx %x:%x %lu %n%*[^\n]%n",
                &addr_start, &addr_end, perms, &offset,
                &devmajor, &devminor, &inode,
                &path_start, &path_end) < 7)
@@ -880,6 +895,20 @@ int bcc_free_memory() {
   fclose(maps);
   free(line);
   return err;
+}
+
+int bcc_elf_get_buildid(const char *path, char *buildid)
+{
+  Elf *e;
+  int fd;
+
+  if (openelf(path, &e, &fd) < 0)
+    return -1;
+
+  if (!find_buildid(e, buildid))
+    return -1;
+
+  return 0;
 }
 
 #if 0

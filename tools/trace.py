@@ -1,10 +1,10 @@
-#!/usr/bin/env python
+#!/usr/bin/python
 #
 # trace         Trace a function and print a trace message based on its
 #               parameters, with an optional filter.
 #
 # usage: trace [-h] [-p PID] [-L TID] [-v] [-Z STRING_SIZE] [-S]
-#              [-M MAX_EVENTS] [-T] [-t] [-K] [-U] [-a] [-I header]
+#              [-M MAX_EVENTS] [-s SYMBOLFILES] [-T] [-t] [-K] [-U] [-a] [-I header]
 #              probe [probe ...]
 #
 # Licensed under the Apache License, Version 2.0 (the "License")
@@ -35,6 +35,7 @@ class Probe(object):
         tgid = -1
         pid = -1
         page_cnt = None
+        build_id_enabled = False
 
         @classmethod
         def configure(cls, args):
@@ -49,6 +50,7 @@ class Probe(object):
                 cls.pid = args.pid or -1
                 cls.page_cnt = args.buffer_pages
                 cls.bin_cmp = args.bin_cmp
+                cls.build_id_enabled = args.sym_file_list is not None
 
         def __init__(self, probe, string_size, kernel_stack, user_stack):
                 self.usdt = None
@@ -218,15 +220,15 @@ class Probe(object):
         aliases_indarg = {
                 "arg1": "({u64 _val; struct pt_regs *_ctx = (struct pt_regs *)PT_REGS_PARM1(ctx);"
                         "  bpf_probe_read(&_val, sizeof(_val), &(PT_REGS_PARM1(_ctx))); _val;})",
-                "arg2": "({u64 _val; struct pt_regs *_ctx = (struct pt_regs *)PT_REGS_PARM2(ctx);"
+                "arg2": "({u64 _val; struct pt_regs *_ctx = (struct pt_regs *)PT_REGS_PARM1(ctx);"
                         "  bpf_probe_read(&_val, sizeof(_val), &(PT_REGS_PARM2(_ctx))); _val;})",
-                "arg3": "({u64 _val; struct pt_regs *_ctx = (struct pt_regs *)PT_REGS_PARM3(ctx);"
+                "arg3": "({u64 _val; struct pt_regs *_ctx = (struct pt_regs *)PT_REGS_PARM1(ctx);"
                         "  bpf_probe_read(&_val, sizeof(_val), &(PT_REGS_PARM3(_ctx))); _val;})",
-                "arg4": "({u64 _val; struct pt_regs *_ctx = (struct pt_regs *)PT_REGS_PARM4(ctx);"
+                "arg4": "({u64 _val; struct pt_regs *_ctx = (struct pt_regs *)PT_REGS_PARM1(ctx);"
                         "  bpf_probe_read(&_val, sizeof(_val), &(PT_REGS_PARM4(_ctx))); _val;})",
-                "arg5": "({u64 _val; struct pt_regs *_ctx = (struct pt_regs *)PT_REGS_PARM5(ctx);"
+                "arg5": "({u64 _val; struct pt_regs *_ctx = (struct pt_regs *)PT_REGS_PARM1(ctx);"
                         "  bpf_probe_read(&_val, sizeof(_val), &(PT_REGS_PARM5(_ctx))); _val;})",
-                "arg6": "({u64 _val; struct pt_regs *_ctx = (struct pt_regs *)PT_REGS_PARM6(ctx);"
+                "arg6": "({u64 _val; struct pt_regs *_ctx = (struct pt_regs *)PT_REGS_PARM1(ctx);"
                         "  bpf_probe_read(&_val, sizeof(_val), &(PT_REGS_PARM6(_ctx))); _val;})",
         }
 
@@ -346,7 +348,9 @@ static inline bool %s(char const *ignored, uintptr_t str) {
                 self.events_name = "%s_events" % self.probe_name
                 self.struct_name = "%s_data_t" % self.probe_name
                 self.stacks_name = "%s_stacks" % self.probe_name
-                stack_table = "BPF_STACK_TRACE(%s, 1024);" % self.stacks_name \
+                stack_type = "BPF_STACK_TRACE" if self.build_id_enabled is False \
+                             else "BPF_STACK_TRACE_BUILDID"
+                stack_table = "%s(%s, 1024);" % (stack_type,self.stacks_name) \
                               if (self.kernel_stack or self.user_stack) else ""
                 data_fields = ""
                 for i, field_type in enumerate(self.types):
@@ -693,6 +697,10 @@ trace -I 'linux/fs_struct.h' 'mntns_install "users = %d", $task->fs->users'
                   help="print CPU id")
                 parser.add_argument("-B", "--bin_cmp", action="store_true",
                   help="allow to use STRCMP with binary values")
+                parser.add_argument('-s', "--sym_file_list", type=str, \
+                  metavar="SYM_FILE_LIST", dest="sym_file_list", \
+                  help="coma separated list of symbol files to use \
+                  for symbol resolution")
                 parser.add_argument("-K", "--kernel-stack",
                   action="store_true", help="output kernel stack trace")
                 parser.add_argument("-U", "--user-stack",
@@ -757,6 +765,9 @@ trace -I 'linux/fs_struct.h' 'mntns_install "users = %d", $task->fs->users'
                                 print(probe.usdt.get_text())
                         usdt_contexts.append(probe.usdt)
                 self.bpf = BPF(text=self.program, usdt_contexts=usdt_contexts)
+                if self.args.sym_file_list is not None:
+                  print("Note: Kernel bpf will report stack map with ip/build_id")
+                  map(lambda x: self.bpf.add_module(x), self.args.sym_file_list.split(','))
                 for probe in self.probes:
                         if self.args.verbose:
                                 print(probe)

@@ -35,12 +35,15 @@
 
 #include "common.h"
 #include "bcc_debug.h"
+#include "bcc_elf.h"
 #include "frontends/b/loader.h"
 #include "frontends/clang/loader.h"
 #include "frontends/clang/b_frontend_action.h"
 #include "bpf_module.h"
 #include "exported_files.h"
 #include "libbpf.h"
+#include "bcc_btf.h"
+#include "libbpf/src/bpf.h"
 
 namespace ebpf {
 
@@ -60,7 +63,7 @@ const string BPFModule::FN_PREFIX = BPF_FN_PREFIX;
 class MyMemoryManager : public SectionMemoryManager {
  public:
 
-  explicit MyMemoryManager(map<string, tuple<uint8_t *, uintptr_t>> *sections)
+  explicit MyMemoryManager(sec_map_def *sections)
       : sections_(sections) {
   }
 
@@ -68,33 +71,37 @@ class MyMemoryManager : public SectionMemoryManager {
   uint8_t *allocateCodeSection(uintptr_t Size, unsigned Alignment,
                                unsigned SectionID,
                                StringRef SectionName) override {
-    uint8_t *Addr = SectionMemoryManager::allocateCodeSection(Size, Alignment, SectionID, SectionName);
-    //printf("allocateCodeSection: %s Addr %p Size %ld Alignment %d SectionID %d\n",
+    // The programs need to change from fake fd to real map fd, so not allocate ReadOnly regions.
+    uint8_t *Addr = SectionMemoryManager::allocateDataSection(Size, Alignment, SectionID, SectionName, false);
+    //printf("allocateDataSection: %s Addr %p Size %ld Alignment %d SectionID %d\n",
     //       SectionName.str().c_str(), (void *)Addr, Size, Alignment, SectionID);
-    (*sections_)[SectionName.str()] = make_tuple(Addr, Size);
+    (*sections_)[SectionName.str()] = make_tuple(Addr, Size, SectionID);
     return Addr;
   }
   uint8_t *allocateDataSection(uintptr_t Size, unsigned Alignment,
                                unsigned SectionID, StringRef SectionName,
                                bool isReadOnly) override {
-    uint8_t *Addr = SectionMemoryManager::allocateDataSection(Size, Alignment, SectionID, SectionName, isReadOnly);
-    //printf("allocateDataSection: %s Addr %p Size %ld Alignment %d SectionID %d RO %d\n",
-    //       SectionName.str().c_str(), (void *)Addr, Size, Alignment, SectionID, isReadOnly);
-    (*sections_)[SectionName.str()] = make_tuple(Addr, Size);
+    // The lines in .BTF.ext line_info, if corresponding to remapped files, will have empty source line.
+    // The line_info will be fixed in place, so not allocate ReadOnly regions.
+    uint8_t *Addr = SectionMemoryManager::allocateDataSection(Size, Alignment, SectionID, SectionName, false);
+    //printf("allocateDataSection: %s Addr %p Size %ld Alignment %d SectionID %d\n",
+    //       SectionName.str().c_str(), (void *)Addr, Size, Alignment, SectionID);
+    (*sections_)[SectionName.str()] = make_tuple(Addr, Size, SectionID);
     return Addr;
   }
-  map<string, tuple<uint8_t *, uintptr_t>> *sections_;
+  sec_map_def *sections_;
 };
 
 BPFModule::BPFModule(unsigned flags, TableStorage *ts, bool rw_engine_enabled,
-                     const std::string &maps_ns)
+                     const std::string &maps_ns, bool allow_rlimit)
     : flags_(flags),
       rw_engine_enabled_(rw_engine_enabled && bpf_module_rw_engine_enabled()),
       used_b_loader_(false),
+      allow_rlimit_(allow_rlimit),
       ctx_(new LLVMContext),
       id_(std::to_string((uintptr_t)this)),
       maps_ns_(maps_ns),
-      ts_(ts) {
+      ts_(ts), btf_(nullptr) {
   initialize_rw_engine();
   LLVMInitializeBPFTarget();
   LLVMInitializeBPFTargetMC();
@@ -138,14 +145,21 @@ BPFModule::~BPFModule() {
   ctx_.reset();
   func_src_.reset();
 
+  if (btf_)
+    delete btf_;
+
   ts_->DeletePrefix(Path({id_}));
+}
+
+int BPFModule::free_bcc_memory() {
+  return bcc_free_memory();
 }
 
 // load an entire c file as a module
 int BPFModule::load_cfile(const string &file, bool in_memory, const char *cflags[], int ncflags) {
   ClangLoader clang_loader(&*ctx_, flags_);
   if (clang_loader.parse(&mod_, *ts_, file, in_memory, cflags, ncflags, id_,
-                         *func_src_, mod_src_, maps_ns_))
+                         *func_src_, mod_src_, maps_ns_, fake_fd_map_, perf_events_))
     return -1;
   return 0;
 }
@@ -158,7 +172,7 @@ int BPFModule::load_cfile(const string &file, bool in_memory, const char *cflags
 int BPFModule::load_includes(const string &text) {
   ClangLoader clang_loader(&*ctx_, flags_);
   if (clang_loader.parse(&mod_, *ts_, text, true, nullptr, 0, "", *func_src_,
-                         mod_src_, ""))
+                         mod_src_, "", fake_fd_map_, perf_events_))
     return -1;
   return 0;
 }
@@ -209,9 +223,170 @@ int BPFModule::run_pass_manager(Module &mod) {
   return 0;
 }
 
+void BPFModule::load_btf(sec_map_def &sections) {
+  uint8_t *btf_sec = nullptr, *btf_ext_sec = nullptr;
+  uintptr_t btf_sec_size = 0, btf_ext_sec_size = 0;
+
+  for (auto section: sections) {
+    auto sname = section.first;
+    uint8_t *addr = get<0>(section.second);
+    uintptr_t size = get<1>(section.second);
+
+    if (strcmp(".BTF", sname.c_str()) == 0) {
+      btf_sec = addr;
+      btf_sec_size = size;
+    }
+
+    if (strcmp(".BTF.ext", sname.c_str()) == 0) {
+      btf_ext_sec = addr;
+      btf_ext_sec_size = size;
+    }
+  }
+
+  if (btf_sec == nullptr || btf_ext_sec == nullptr)
+    return;
+
+  // Both .BTF and .BTF.ext ELF sections are present.
+  // The remapped files (the main file and /virtual/include/bcc/helpers.h)
+  // will provide missing source codes in the .BTF.ext line_info table.
+  auto helpers_h = ExportedFiles::headers().find("/virtual/include/bcc/helpers.h");
+  if (helpers_h == ExportedFiles::headers().end()) {
+    fprintf(stderr, "Internal error: missing bcc/helpers.h");
+    return;
+  }
+  std::map<std::string, std::string> remapped_sources;
+  remapped_sources["/virtual/main.c"] = mod_src_;
+  remapped_sources["/virtual/include/bcc/helpers.h"] = helpers_h->second;
+
+  BTF *btf = new BTF(flags_ & DEBUG_BTF);
+  int ret = btf->load(btf_sec, btf_sec_size, btf_ext_sec, btf_ext_sec_size,
+                       remapped_sources);
+  if (ret) {
+    delete btf;
+    return;
+  }
+  btf_ = btf;
+}
+
+int BPFModule::load_maps(sec_map_def &sections) {
+  // find .maps.<table_name> sections and retrieve all map key/value type id's
+  std::map<std::string, std::pair<int, int>> map_tids;
+  if (btf_) {
+    for (auto section : sections) {
+      auto sec_name = section.first;
+      if (strncmp(".maps.", sec_name.c_str(), 6) == 0) {
+        std::string map_name = sec_name.substr(6);
+        unsigned key_tid = 0, value_tid = 0;
+        unsigned expected_ksize = 0, expected_vsize = 0;
+
+        // skip extern maps, which won't be in fake_fd_map_ as they do not
+        // require explicit bpf_create_map.
+        bool is_extern = false;
+        for (auto &t : tables_) {
+          if (t->name == map_name) {
+            is_extern = t->is_extern;
+            break;
+          }
+        }
+        if (is_extern)
+          continue;
+
+        for (auto map : fake_fd_map_) {
+          std::string name;
+
+          name = get<1>(map.second);
+          if (map_name == name) {
+            expected_ksize = get<2>(map.second);
+            expected_vsize = get<3>(map.second);
+            break;
+          }
+        }
+
+        int ret = btf_->get_map_tids(map_name, expected_ksize,
+                                     expected_vsize, &key_tid, &value_tid);
+        if (ret)
+          continue;
+
+        map_tids[map_name] = std::make_pair(key_tid, value_tid);
+      }
+    }
+  }
+
+  // create maps
+  std::map<int, int> map_fds;
+  for (auto map : fake_fd_map_) {
+    int fd, fake_fd, map_type, key_size, value_size, max_entries, map_flags;
+    const char *map_name;
+
+    fake_fd     = map.first;
+    map_type    = get<0>(map.second);
+    map_name    = get<1>(map.second).c_str();
+    key_size    = get<2>(map.second);
+    value_size  = get<3>(map.second);
+    max_entries = get<4>(map.second);
+    map_flags   = get<5>(map.second);
+
+    struct bpf_create_map_attr attr = {};
+    attr.map_type = (enum bpf_map_type)map_type;
+    attr.name = map_name;
+    attr.key_size = key_size;
+    attr.value_size = value_size;
+    attr.max_entries = max_entries;
+    attr.map_flags = map_flags;
+
+    if (map_tids.find(map_name) != map_tids.end()) {
+      attr.btf_fd = btf_->get_fd();
+      attr.btf_key_type_id = map_tids[map_name].first;
+      attr.btf_value_type_id = map_tids[map_name].second;
+    }
+
+    fd = bcc_create_map_xattr(&attr, allow_rlimit_);
+    if (fd < 0) {
+      fprintf(stderr, "could not open bpf map: %s, error: %s\n",
+              map_name, strerror(errno));
+      return -1;
+    }
+
+    map_fds[fake_fd] = fd;
+  }
+
+  // update map table fd's
+  for (auto it = ts_->begin(), up = ts_->end(); it != up; ++it) {
+    TableDesc &table = it->second;
+    if (map_fds.find(table.fake_fd) != map_fds.end()) {
+      table.fd = map_fds[table.fake_fd];
+      table.fake_fd = 0;
+    }
+  }
+
+  // update instructions
+  for (auto section : sections) {
+    auto sec_name = section.first;
+    if (strncmp(".bpf.fn.", sec_name.c_str(), 8) == 0) {
+      uint8_t *addr = get<0>(section.second);
+      uintptr_t size = get<1>(section.second);
+      struct bpf_insn *insns = (struct bpf_insn *)addr;
+      int i, num_insns;
+
+      num_insns = size/sizeof(struct bpf_insn);
+      for (i = 0; i < num_insns; i++) {
+        if (insns[i].code == (BPF_LD | BPF_DW | BPF_IMM)) {
+          // change map_fd is it is a ld_pseudo */
+          if (insns[i].src_reg == BPF_PSEUDO_MAP_FD &&
+              map_fds.find(insns[i].imm) != map_fds.end())
+            insns[i].imm = map_fds[insns[i].imm];
+          i++;
+        }
+      }
+    }
+  }
+
+  return 0;
+}
+
 int BPFModule::finalize() {
   Module *mod = &*mod_;
-  std::map<std::string, std::tuple<uint8_t *, uintptr_t>> tmp_sections,
+  sec_map_def tmp_sections,
       *sections_p;
 
   mod->setTargetTriple("bpf-pc-linux");
@@ -234,8 +409,12 @@ int BPFModule::finalize() {
     return -1;
   }
 
+#if LLVM_MAJOR_VERSION >= 9
+  engine_->setProcessAllSections(true);
+#else
   if (flags_ & DEBUG_SOURCE)
     engine_->setProcessAllSections(true);
+#endif
 
   if (int rc = run_pass_manager(*mod))
     return rc;
@@ -247,6 +426,10 @@ int BPFModule::finalize() {
                                 src_dbg_fmap_);
     src_debugger.dump();
   }
+
+  load_btf(*sections_p);
+  if (load_maps(*sections_p))
+    return -1;
 
   if (!rw_engine_enabled_) {
     // Setup sections_ correctly and then free llvm internal memory
@@ -260,7 +443,7 @@ int BPFModule::finalize() {
         tmp_p = new uint8_t[size];
         memcpy(tmp_p, addr, size);
       }
-      sections_[fname] = make_tuple(tmp_p, size);
+      sections_[fname] = make_tuple(tmp_p, size, get<2>(section.second));
     }
     engine_.reset();
     ctx_.reset();
@@ -411,6 +594,20 @@ unsigned BPFModule::kern_version() const {
 }
 
 size_t BPFModule::num_tables() const { return tables_.size(); }
+
+size_t BPFModule::perf_event_fields(const char *event) const {
+  auto it = perf_events_.find(event);
+  if (it == perf_events_.end())
+    return 0;
+  return it->second.size();
+}
+
+const char * BPFModule::perf_event_field(const char *event, size_t i) const {
+  auto it = perf_events_.find(event);
+  if (it == perf_events_.end() || i >= it->second.size())
+    return nullptr;
+  return it->second[i].c_str();
+}
 
 size_t BPFModule::table_id(const string &name) const {
   auto it = table_names_.find(name);
@@ -638,6 +835,50 @@ int BPFModule::load_string(const string &text, const char *cflags[], int ncflags
   if (int rc = finalize())
     return rc;
   return 0;
+}
+
+int BPFModule::bcc_func_load(int prog_type, const char *name,
+                const struct bpf_insn *insns, int prog_len,
+                const char *license, unsigned kern_version,
+                int log_level, char *log_buf, unsigned log_buf_size) {
+  struct bpf_load_program_attr attr = {};
+  unsigned func_info_cnt, line_info_cnt, finfo_rec_size, linfo_rec_size;
+  void *func_info = NULL, *line_info = NULL;
+  int ret;
+
+  attr.prog_type = (enum bpf_prog_type)prog_type;
+  attr.name = name;
+  attr.insns = insns;
+  attr.license = license;
+  attr.kern_version = kern_version;
+  attr.log_level = log_level;
+
+  if (btf_) {
+    int btf_fd = btf_->get_fd();
+    char secname[256];
+
+    ::snprintf(secname, sizeof(secname), ".bpf.fn.%s", name);
+    ret = btf_->get_btf_info(secname, &func_info, &func_info_cnt,
+                             &finfo_rec_size, &line_info,
+                             &line_info_cnt, &linfo_rec_size);
+    if (!ret) {
+      attr.prog_btf_fd = btf_fd;
+      attr.func_info = func_info;
+      attr.func_info_cnt = func_info_cnt;
+      attr.func_info_rec_size = finfo_rec_size;
+      attr.line_info = line_info;
+      attr.line_info_cnt = line_info_cnt;
+      attr.line_info_rec_size = linfo_rec_size;
+    }
+  }
+
+  ret = bcc_prog_load_xattr(&attr, prog_len, log_buf, log_buf_size, allow_rlimit_);
+  if (btf_) {
+    free(func_info);
+    free(line_info);
+  }
+
+  return ret;
 }
 
 } // namespace ebpf

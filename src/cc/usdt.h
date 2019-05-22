@@ -81,6 +81,7 @@ public:
   friend class ArgumentParser;
   friend class ArgumentParser_aarch64;
   friend class ArgumentParser_powerpc64;
+  friend class ArgumentParser_s390x;
   friend class ArgumentParser_x64;
 };
 
@@ -128,6 +129,12 @@ class ArgumentParser_powerpc64 : public ArgumentParser {
 public:
   bool parse(Argument *dest);
   ArgumentParser_powerpc64(const char *arg) : ArgumentParser(arg) {}
+};
+
+class ArgumentParser_s390x : public ArgumentParser {
+public:
+  bool parse(Argument *dest);
+  ArgumentParser_s390x(const char *arg) : ArgumentParser(arg) {}
 };
 
 class ArgumentParser_x64 : public ArgumentParser {
@@ -273,6 +280,8 @@ public:
   Probe *get(int pos) { return probes_[pos].get(); }
 
   bool enable_probe(const std::string &probe_name, const std::string &fn_name);
+  bool enable_probe(const std::string &provider_name,
+                    const std::string &probe_name, const std::string &fn_name);
 
   typedef void (*each_cb)(struct bcc_usdt *);
   void each(each_cb callback);

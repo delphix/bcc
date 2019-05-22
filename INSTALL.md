@@ -8,11 +8,13 @@
   - [Gentoo](#gentoo---portage)
   - [openSUSE](#opensuse---binary)
   - [RHEL](#rhel---binary)
+  - [Amazon Linux 1](#Amazon-Linux-1---Binary)
 * [Source](#source)
   - [Debian](#debian---source)
   - [Ubuntu](#ubuntu---source)
   - [Fedora](#fedora---source)
   - [openSUSE](#opensuse---source)
+  - [Centos](#centos---source)
   - [Amazon Linux](#amazon-linux---source)
 * [Older Instructions](#older-instructions)
 
@@ -30,7 +32,10 @@ CONFIG_NET_CLS_BPF=m
 # [optional, for tc actions]
 CONFIG_NET_ACT_BPF=m
 CONFIG_BPF_JIT=y
+# [for Linux kernel versions 4.1 through 4.6]
 CONFIG_HAVE_BPF_JIT=y
+# [for Linux kernel versions 4.7 and later]
+CONFIG_HAVE_EBPF_JIT=y
 # [optional, for kprobes]
 CONFIG_BPF_EVENTS=y
 ```
@@ -54,7 +59,32 @@ Kernel compile flags can usually be checked by looking at `/proc/config.gz` or
 
 The stable and the nightly packages are built for Ubuntu Xenial (16.04), Ubuntu Artful (17.10) and Ubuntu Bionic (18.04). The steps are very straightforward, no need to upgrade the kernel or compile from source!
 
-**Stable and Signed Packages**
+**Ubuntu Packages**
+
+As of Ubuntu Bionic (18.04), versions of bcc are available in the standard Ubuntu
+multiverse repository. The Ubuntu packages have slightly different names: where iovisor
+packages use `bcc` in the name (e.g. `bcc-tools`), Ubuntu packages use `bpfcc` (e.g.
+`bpfcc-tools`). Source packages and the binary packages produced from them can be
+found at [packages.ubuntu.com](https://packages.ubuntu.com/search?suite=default&section=all&arch=any&keywords=bpfcc&searchon=sourcenames).
+
+```bash
+sudo apt-get install bpfcc-tools linux-headers-$(uname -r)
+```
+
+The tools are installed in `/sbin` (`/usr/sbin` in Ubuntu 18.04) with a `-bpfcc` extension. Try running `sudo opensnoop-bpfcc`.
+
+**_Note_**: the Ubuntu packages have different names but the package contents, in most cases, conflict
+and as such _cannot_ be installed alongside upstream packages. Should one choose to use
+Ubuntu's packages instead of the upstream iovisor packages (or vice-versa), the
+conflicting packages will need to be removed.
+
+The iovisor packages _do_ declare they provide the Ubuntu packages and as such may be
+used to satisfy dependencies. For example, should one attempt to install package `foo`
+which declares a dependency on `libbpfcc` while the upstream `libbcc` package is installed,
+`foo` should install without trouble as `libbcc` declares that it provides `libbpfcc`.
+That said, one should always test such a configuration in case of version incompatibilities.
+
+**Upstream Stable and Signed Packages**
 
 ```bash
 sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 4052245BD4284CDD
@@ -64,7 +94,7 @@ sudo apt-get install bcc-tools libbcc-examples linux-headers-$(uname -r)
 ```
 (replace `xenial` with `artful` or `bionic` as appropriate). Tools will be installed under /usr/share/bcc/tools.
 
-**Nightly Packages**
+**Upstream Nightly Packages**
 
 ```bash
 echo "deb [trusted=yes] https://repo.iovisor.org/apt/xenial xenial-nightly main" | sudo tee /etc/apt/sources.list.d/iovisor.list
@@ -72,16 +102,6 @@ sudo apt-get update
 sudo apt-get install bcc-tools libbcc-examples linux-headers-$(uname -r)
 ```
 (replace `xenial` with `artful` or `bionic` as appropriate)
-
-**Ubuntu Packages**
-
-The previous commands will install the latest bcc from the iovisor repositories. It is also available from the standard Ubuntu multiverse repository, under the package name `bpfcc-tools`.
-
-```bash
-sudo apt-get install bpfcc-tools linux-headers-$(uname -r)
-```
-
-The tools are installed in /sbin with a -bpfcc extension. Try running `sudo opensnoop-bpfcc`.
 
 ## Fedora - Binary
 
@@ -162,6 +182,23 @@ For RHEL 7.6, bcc is already included in the official yum repository as bcc-tool
 
 ```
 yum install bcc-tools
+```
+
+## Amazon Linux 1 - Binary
+Use case 1. Install BCC for latest kernel available in repo:
+   Tested on Amazon Linux AMI release 2018.03 (kernel 4.14.88-72.73.amzn1.x86_64)
+```
+sudo yum update kernel
+sudo yum install bcc
+sudo reboot
+```
+
+Use case 2. Install BCC for your AMI's default kernel (no reboot required):
+   Tested on Amazon Linux AMI release 2018.03 (kernel 4.14.77-70.59.amzn1.x86_64)
+```
+sudo yum install kernel-headers-$(uname -r | cut -d'.' -f1-5)
+sudo yum install kernel-devel-$(uname -r | cut -d'.' -f1-5)
+sudo yum install bcc
 ```
 
 # Source
@@ -355,13 +392,62 @@ sudo make install
 popd
 ```
 
+## Centos - Source
+
+For Centos 7.6 only
+
+### Install build dependencies
+
+```
+sudo yum install -y epel-release
+sudo yum update -y
+sudo yum groupinstall -y "Development tools"
+sudo yum install -y elfutils-libelf-devel cmake3
+sudo yum install -y luajit luajit-devel  # for Lua support
+```
+
+### Install and compile LLVM
+
+```
+curl  -LO  http://releases.llvm.org/7.0.1/llvm-7.0.1.src.tar.xz
+curl  -LO  http://releases.llvm.org/7.0.1/cfe-7.0.1.src.tar.xz
+tar -xf cfe-7.0.1.src.tar.xz
+tar -xf llvm-7.0.1.src.tar.xz
+
+mkdir clang-build
+mkdir llvm-build
+
+cd llvm-build
+cmake3 -G "Unix Makefiles" -DLLVM_TARGETS_TO_BUILD="BPF;X86" \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr ../llvm-7.0.1.src
+make
+sudo make install
+
+cd ../clang-build
+cmake3 -G "Unix Makefiles" -DLLVM_TARGETS_TO_BUILD="BPF;X86" \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr ../cfe-7.0.1.src
+make
+sudo make install
+cd ..
+```
+
+### Install and compile BCC
+
+```
+git clone https://github.com/iovisor/bcc.git
+mkdir bcc/build; cd bcc/build
+cmake .. -DCMAKE_INSTALL_PREFIX=/usr
+make
+sudo make install
+```
+
 ## Amazon Linux - Source
 
 Tested on Amazon Linux AMI release 2018.03 (kernel 4.14.47-56.37.amzn1.x86_64)
 
 ### Install packages required for building
 ```
-# enable epel to get iperf, luajit, luajit-devel, cmake3 (cmake3 is required to support c++11) 
+# enable epel to get iperf, luajit, luajit-devel, cmake3 (cmake3 is required to support c++11)
 sudo yum-config-manager --enable epel
 
 sudo yum install -y bison cmake3 ethtool flex git iperf libstdc++-static python-netaddr gcc gcc-c++ make zlib-devel elfutils-libelf-devel

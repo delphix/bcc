@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include "bpf_common.h"
+#include "bcc_common.h"
 #include "bpf_module.h"
 
 extern "C" {
@@ -26,8 +26,9 @@ void * bpf_module_create_b(const char *filename, const char *proto_filename, uns
   return mod;
 }
 
-void * bpf_module_create_c(const char *filename, unsigned flags, const char *cflags[], int ncflags) {
-  auto mod = new ebpf::BPFModule(flags);
+void * bpf_module_create_c(const char *filename, unsigned flags, const char *cflags[],
+                           int ncflags, bool allow_rlimit) {
+  auto mod = new ebpf::BPFModule(flags, nullptr, true, "", allow_rlimit);
   if (mod->load_c(filename, cflags, ncflags) != 0) {
     delete mod;
     return nullptr;
@@ -35,8 +36,9 @@ void * bpf_module_create_c(const char *filename, unsigned flags, const char *cfl
   return mod;
 }
 
-void * bpf_module_create_c_from_string(const char *text, unsigned flags, const char *cflags[], int ncflags) {
-  auto mod = new ebpf::BPFModule(flags);
+void * bpf_module_create_c_from_string(const char *text, unsigned flags, const char *cflags[],
+                                       int ncflags, bool allow_rlimit) {
+  auto mod = new ebpf::BPFModule(flags, nullptr, true, "", allow_rlimit);
   if (mod->load_string(text, cflags, ncflags) != 0) {
     delete mod;
     return nullptr;
@@ -228,10 +230,37 @@ int bpf_table_key_sscanf(void *program, size_t id, const char *buf, void *key) {
   if (!mod) return -1;
   return mod->table_key_scanf(id, buf, key);
 }
+
 int bpf_table_leaf_sscanf(void *program, size_t id, const char *buf, void *leaf) {
   auto mod = static_cast<ebpf::BPFModule *>(program);
   if (!mod) return -1;
   return mod->table_leaf_scanf(id, buf, leaf);
+}
+
+int bcc_func_load(void *program, int prog_type, const char *name,
+                  const struct bpf_insn *insns, int prog_len,
+                  const char *license, unsigned kern_version,
+                  int log_level, char *log_buf, unsigned log_buf_size) {
+  auto mod = static_cast<ebpf::BPFModule *>(program);
+  if (!mod) return -1;
+  return mod->bcc_func_load(prog_type, name, insns, prog_len,
+                            license, kern_version, log_level,
+                            log_buf, log_buf_size);
+
+}
+
+size_t bpf_perf_event_fields(void *program, const char *event) {
+  auto mod = static_cast<ebpf::BPFModule *>(program);
+  if (!mod)
+    return 0;
+  return mod->perf_event_fields(event);
+}
+
+const char * bpf_perf_event_field(void *program, const char *event, size_t i) {
+  auto mod = static_cast<ebpf::BPFModule *>(program);
+  if (!mod)
+    return nullptr;
+  return mod->perf_event_field(event, i);
 }
 
 }

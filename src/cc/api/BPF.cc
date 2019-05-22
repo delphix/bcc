@@ -86,6 +86,8 @@ BPF::~BPF() {
   if (res.code() != 0)
     std::cerr << "Failed to detach all probes on destruction: " << std::endl
               << res.msg() << std::endl;
+  bcc_free_buildsymcache(bsymcache_);
+  bsymcache_ = NULL;
 }
 
 StatusTuple BPF::detach_all() {
@@ -165,7 +167,8 @@ StatusTuple BPF::detach_all() {
 StatusTuple BPF::attach_kprobe(const std::string& kernel_func,
                                const std::string& probe_func,
                                uint64_t kernel_func_offset,
-                               bpf_probe_attach_type attach_type) {
+                               bpf_probe_attach_type attach_type,
+                               int maxactive) {
   std::string probe_event = get_kprobe_event(kernel_func, attach_type);
   if (kprobes_.find(probe_event) != kprobes_.end())
     return StatusTuple(-1, "kprobe %s already attached", probe_event.c_str());
@@ -174,7 +177,8 @@ StatusTuple BPF::attach_kprobe(const std::string& kernel_func,
   TRY2(load_func(probe_func, BPF_PROG_TYPE_KPROBE, probe_fd));
 
   int res_fd = bpf_attach_kprobe(probe_fd, attach_type, probe_event.c_str(),
-                                 kernel_func.c_str(), kernel_func_offset);
+                                 kernel_func.c_str(), kernel_func_offset,
+                                 maxactive);
 
   if (res_fd < 0) {
     TRY2(unload_func(probe_func));
@@ -548,7 +552,7 @@ StatusTuple BPF::load_func(const std::string& func_name, bpf_prog_type type,
   else if (flag_ & DEBUG_BPF)
     log_level = 1;
 
-  fd = bpf_prog_load(type, func_name.c_str(),
+  fd = bpf_module_->bcc_func_load(type, func_name.c_str(),
                      reinterpret_cast<struct bpf_insn*>(func_start), func_size,
                      bpf_module_->license(), bpf_module_->kern_version(),
                      log_level, nullptr, 0);
@@ -556,8 +560,10 @@ StatusTuple BPF::load_func(const std::string& func_name, bpf_prog_type type,
   if (fd < 0)
     return StatusTuple(-1, "Failed to load %s: %d", func_name.c_str(), fd);
 
-  bpf_module_->annotate_prog_tag(
+  int ret = bpf_module_->annotate_prog_tag(
       func_name, fd, reinterpret_cast<struct bpf_insn*>(func_start), func_size);
+  if (ret < 0)
+    fprintf(stderr, "WARNING: cannot get prog tag, ignore saving source with program tag\n");
   funcs_[func_name] = fd;
   return StatusTuple(0);
 }
@@ -648,6 +654,21 @@ BPFStackTable BPF::get_stack_table(const std::string& name, bool use_debug_file,
   if (bpf_module_->table_storage().Find(Path({bpf_module_->id(), name}), it))
     return BPFStackTable(it->second, use_debug_file, check_debug_file_crc);
   return BPFStackTable({}, use_debug_file, check_debug_file_crc);
+}
+
+BPFStackBuildIdTable BPF::get_stackbuildid_table(const std::string &name, bool use_debug_file,
+                                                 bool check_debug_file_crc) {
+  TableStorage::iterator it;
+
+  if (bpf_module_->table_storage().Find(Path({bpf_module_->id(), name}), it))
+    return BPFStackBuildIdTable(it->second, use_debug_file, check_debug_file_crc, get_bsymcache());
+  return BPFStackBuildIdTable({}, use_debug_file, check_debug_file_crc, get_bsymcache());
+}
+
+bool BPF::add_module(std::string module)
+{
+  return bcc_buildsymcache_add_module(get_bsymcache(), module.c_str()) != 0 ?
+    false : true;
 }
 
 std::string BPF::get_uprobe_event(const std::string& binary_path,
