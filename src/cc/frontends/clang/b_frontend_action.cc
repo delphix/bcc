@@ -34,6 +34,7 @@
 #include "loader.h"
 #include "table_storage.h"
 #include "arch_helper.h"
+#include "libbpf/src/bpf.h"
 
 #include "libbpf.h"
 
@@ -116,7 +117,11 @@ class ProbeChecker : public RecursiveASTVisitor<ProbeChecker> {
       for(auto p : ptregs_) {
         if (std::get<0>(p) == E->getDirectCallee()) {
           needs_probe_ = true;
-          nb_derefs_ += std::get<1>(p);
+          // ptregs_ stores the number of dereferences needed to get the external
+          // pointer, while nb_derefs_ stores the number of dereferences
+          // encountered.  So, any dereference encountered is one less
+          // dereference needed to get the external pointer.
+          nb_derefs_ -= std::get<1>(p);
           return false;
         }
       }
@@ -178,7 +183,11 @@ class ProbeChecker : public RecursiveASTVisitor<ProbeChecker> {
       for(auto p : ptregs_) {
         if (std::get<0>(p) == E->getDecl()) {
           needs_probe_ = true;
-          nb_derefs_ += std::get<1>(p);
+          // ptregs_ stores the number of dereferences needed to get the external
+          // pointer, while nb_derefs_ stores the number of dereferences
+          // encountered.  So, any dereference encountered is one less
+          // dereference needed to get the external pointer.
+          nb_derefs_ -= std::get<1>(p);
           return false;
         }
       }
@@ -206,8 +215,8 @@ class ProbeChecker : public RecursiveASTVisitor<ProbeChecker> {
 // Visit a piece of the AST and mark it as needing probe reads
 class ProbeSetter : public RecursiveASTVisitor<ProbeSetter> {
  public:
-  explicit ProbeSetter(set<tuple<Decl *, int>> *ptregs, int nb_addrof)
-      : ptregs_(ptregs), nb_derefs_(-nb_addrof) {}
+  explicit ProbeSetter(set<tuple<Decl *, int>> *ptregs, int nb_derefs)
+      : ptregs_(ptregs), nb_derefs_(nb_derefs) {}
   bool VisitDeclRefExpr(DeclRefExpr *E) {
     tuple<Decl *, int> pt = make_tuple(E->getDecl(), nb_derefs_);
     ptregs_->insert(pt);
@@ -258,9 +267,9 @@ ProbeVisitor::ProbeVisitor(ASTContext &C, Rewriter &rewriter,
   C(C), rewriter_(rewriter), m_(m), track_helpers_(track_helpers),
   addrof_stmt_(nullptr), is_addrof_(false) {}
 
-bool ProbeVisitor::assignsExtPtr(Expr *E, int *nbAddrOf) {
+bool ProbeVisitor::assignsExtPtr(Expr *E, int *nbDerefs) {
   if (IsContextMemberExpr(E)) {
-    *nbAddrOf = 0;
+    *nbDerefs = 0;
     return true;
   }
 
@@ -277,7 +286,7 @@ bool ProbeVisitor::assignsExtPtr(Expr *E, int *nbAddrOf) {
     // an assignment, if we went through n addrof before getting the external
     // pointer, then we'll need n dereferences on the left-hand side variable
     // to get to the external pointer.
-    *nbAddrOf = -checker.get_nb_derefs();
+    *nbDerefs = -checker.get_nb_derefs();
     return true;
   }
 
@@ -290,7 +299,8 @@ bool ProbeVisitor::assignsExtPtr(Expr *E, int *nbAddrOf) {
           if (!A->getName().startswith("maps"))
             return false;
 
-          if (memb_name == "lookup" || memb_name == "lookup_or_init") {
+          if (memb_name == "lookup" || memb_name == "lookup_or_init" ||
+              memb_name == "lookup_or_try_init") {
             if (m_.find(Ref->getDecl()) != m_.end()) {
               // Retrieved an ext. pointer from a map, mark LHS as ext. pointer.
               // Pointers from maps always need a single dereference to get the
@@ -298,7 +308,7 @@ bool ProbeVisitor::assignsExtPtr(Expr *E, int *nbAddrOf) {
               // be a pointer to an external pointer as the verifier prohibits
               // storing known pointers (to map values, context, the stack, or
               // the packet) in maps.
-              *nbAddrOf = 1;
+              *nbDerefs = 1;
               return true;
             }
           }
@@ -310,10 +320,10 @@ bool ProbeVisitor::assignsExtPtr(Expr *E, int *nbAddrOf) {
 }
 bool ProbeVisitor::VisitVarDecl(VarDecl *D) {
   if (Expr *E = D->getInit()) {
-    int nbAddrOf;
-    if (assignsExtPtr(E, &nbAddrOf)) {
+    int nbDerefs;
+    if (assignsExtPtr(E, &nbDerefs)) {
       // The negative of the number of addrof is the number of dereferences.
-      tuple<Decl *, int> pt = make_tuple(D, -nbAddrOf);
+      tuple<Decl *, int> pt = make_tuple(D, nbDerefs);
       set_ptreg(pt);
     }
   }
@@ -349,7 +359,7 @@ bool ProbeVisitor::VisitCallExpr(CallExpr *Call) {
                                             true);
         if (checker.needs_probe()) {
           tuple<Decl *, int> pt = make_tuple(F->getParamDecl(i),
-                                             checker.get_nb_derefs());
+                                             -checker.get_nb_derefs());
           ptregs_.insert(pt);
         }
         ++i;
@@ -389,12 +399,13 @@ bool ProbeVisitor::VisitReturnStmt(ReturnStmt *R) {
                                       track_helpers_, true);
   if (checker.needs_probe()) {
     int curr_nb_derefs = ptregs_returned_.back();
+    int nb_derefs = -checker.get_nb_derefs();
     /* If the function returns external pointers with different levels of
      * indirection, we handle the case with the highest level of indirection
      * and leave it to the user to manually handle other cases. */
-    if (checker.get_nb_derefs() > curr_nb_derefs) {
+    if (nb_derefs > curr_nb_derefs) {
       ptregs_returned_.pop_back();
-      ptregs_returned_.push_back(checker.get_nb_derefs());
+      ptregs_returned_.push_back(nb_derefs);
     }
   }
   return true;
@@ -404,9 +415,9 @@ bool ProbeVisitor::VisitBinaryOperator(BinaryOperator *E) {
     return true;
 
   // copy probe attribute from RHS to LHS if present
-  int nbAddrOf;
-  if (assignsExtPtr(E->getRHS(), &nbAddrOf)) {
-    ProbeSetter setter(&ptregs_, nbAddrOf);
+  int nbDerefs;
+  if (assignsExtPtr(E->getRHS(), &nbDerefs)) {
+    ProbeSetter setter(&ptregs_, nbDerefs);
     setter.TraverseStmt(E->getLHS());
   }
   return true;
@@ -479,6 +490,10 @@ bool ProbeVisitor::VisitMemberExpr(MemberExpr *E) {
   if (!ProbeChecker(base, ptregs_, track_helpers_).needs_probe())
     return true;
 
+  // If the base is an array, we will skip rewriting. See issue #2352.
+  if (E->getType()->isArrayType())
+    return true;
+
   string rhs = rewriter_.getRewrittenText(expansionRange(SourceRange(rhs_start, GET_ENDLOC(E))));
   string base_type = base->getType()->getPointeeType().getAsString();
   string pre, post;
@@ -498,6 +513,10 @@ bool ProbeVisitor::VisitArraySubscriptExpr(ArraySubscriptExpr *E) {
   if (is_addrof_)
     return true;
 
+  // If the base is an array, we will skip rewriting. See issue #2352.
+  if (E->getType()->isArrayType())
+    return true;
+
   if (!rewriter_.isRewritable(GET_BEGINLOC(E)))
     return true;
 
@@ -515,6 +534,20 @@ bool ProbeVisitor::VisitArraySubscriptExpr(ArraySubscriptExpr *E) {
   LangOptions opts;
   SourceLocation lbracket_start, lbracket_end;
   SourceRange lbracket_range;
+
+  /* For cases like daddr->s6_addr[4], clang encodes the end location of "base"
+   * as "]". This makes it hard to rewrite the expression like
+   * "daddr->s6_addr  [ 4 ]" since we do not know the end location
+   * of "addr->s6_addr". Let us abort the operation if this is the case.
+   */
+  lbracket_start = Lexer::getLocForEndOfToken(GET_ENDLOC(base), 1,
+                                              rewriter_.getSourceMgr(),
+                                              opts).getLocWithOffset(1);
+  lbracket_end = GET_BEGINLOC(idx).getLocWithOffset(-1);
+  lbracket_range = expansionRange(SourceRange(lbracket_start, lbracket_end));
+  if (rewriter_.getRewrittenText(lbracket_range).size() == 0)
+    return true;
+
   pre = "({ typeof(" + E->getType().getAsString() + ") _val; __builtin_memset(&_val, 0, sizeof(_val));";
   pre += " bpf_probe_read(&_val, sizeof(_val), (u64)((";
   if (isMemberDereference(base)) {
@@ -530,11 +563,6 @@ bool ProbeVisitor::VisitArraySubscriptExpr(ArraySubscriptExpr *E) {
    * a method to retrieve the left bracket, replace everything from the end of
    * the base to the start of the index. */
   lbracket = ") + (";
-  lbracket_start = Lexer::getLocForEndOfToken(GET_ENDLOC(base), 1,
-                                              rewriter_.getSourceMgr(),
-                                              opts).getLocWithOffset(1);
-  lbracket_end = GET_BEGINLOC(idx).getLocWithOffset(-1);
-  lbracket_range = expansionRange(SourceRange(lbracket_start, lbracket_end));
   rewriter_.ReplaceText(lbracket_range, lbracket);
 
   rbracket = "))); _val; })";
@@ -696,7 +724,7 @@ bool BTypeVisitor::VisitFunctionDecl(FunctionDecl *D) {
   // extracted by the MemoryManager
   auto real_start_loc = rewriter_.getSourceMgr().getFileLoc(GET_BEGINLOC(D));
   if (fe_.is_rewritable_ext_func(D)) {
-    current_fn_ = D->getName();
+    current_fn_ = string(D->getName());
     string bd = rewriter_.getRewrittenText(expansionRange(D->getSourceRange()));
     fe_.func_src_.set_src(current_fn_, bd);
     fe_.func_range_[current_fn_] = expansionRange(D->getSourceRange());
@@ -758,8 +786,8 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
 
         // find the table fd, which was opened at declaration time
         TableStorage::iterator desc;
-        Path local_path({fe_.id(), Ref->getDecl()->getName()});
-        Path global_path({Ref->getDecl()->getName()});
+        Path local_path({fe_.id(), string(Ref->getDecl()->getName())});
+        Path global_path({string(Ref->getDecl()->getName())});
         if (!fe_.table_storage().Find(local_path, desc)) {
           if (!fe_.table_storage().Find(global_path, desc)) {
             error(GET_ENDLOC(Ref), "bpf_table %0 failed to open") << Ref->getDecl()->getName();
@@ -771,8 +799,8 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
         string txt;
         auto rewrite_start = GET_BEGINLOC(Call);
         auto rewrite_end = GET_ENDLOC(Call);
-        if (memb_name == "lookup_or_init") {
-          string name = Ref->getDecl()->getName();
+        if (memb_name == "lookup_or_init" || memb_name == "lookup_or_try_init") {
+          string name = string(Ref->getDecl()->getName());
           string arg0 = rewriter_.getRewrittenText(expansionRange(Call->getArg(0)->getSourceRange()));
           string arg1 = rewriter_.getRewrittenText(expansionRange(Call->getArg(1)->getSourceRange()));
           string lookup = "bpf_map_lookup_elem_(bpf_pseudo_fd(1, " + fd + ")";
@@ -781,11 +809,13 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
           txt += "if (!leaf) {";
           txt += " " + update + ", " + arg0 + ", " + arg1 + ", BPF_NOEXIST);";
           txt += " leaf = " + lookup + ", " + arg0 + ");";
-          txt += " if (!leaf) return 0;";
+          if (memb_name == "lookup_or_init") {
+            txt += " if (!leaf) return 0;";
+          }
           txt += "}";
           txt += "leaf;})";
         } else if (memb_name == "increment") {
-          string name = Ref->getDecl()->getName();
+          string name = string(Ref->getDecl()->getName());
           string arg0 = rewriter_.getRewrittenText(expansionRange(Call->getArg(0)->getSourceRange()));
 
           string increment_value = "1";
@@ -807,7 +837,7 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
           }
           txt += "})";
         } else if (memb_name == "perf_submit") {
-          string name = Ref->getDecl()->getName();
+          string name = string(Ref->getDecl()->getName());
           string arg0 = rewriter_.getRewrittenText(expansionRange(Call->getArg(0)->getSourceRange()));
           string args_other = rewriter_.getRewrittenText(expansionRange(SourceRange(GET_BEGINLOC(Call->getArg(1)),
                                                            GET_ENDLOC(Call->getArg(2)))));
@@ -852,6 +882,12 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
               error(GET_BEGINLOC(Call), "get_stackid only available on stacktrace maps");
               return false;
             }
+        } else if (memb_name == "sock_map_update" || memb_name == "sock_hash_update") {
+          string ctx = rewriter_.getRewrittenText(expansionRange(Call->getArg(0)->getSourceRange()));
+          string keyp = rewriter_.getRewrittenText(expansionRange(Call->getArg(1)->getSourceRange()));
+          string flag = rewriter_.getRewrittenText(expansionRange(Call->getArg(2)->getSourceRange()));
+          txt = "bpf_" + string(memb_name) + "(" + ctx + ", " +
+            "bpf_pseudo_fd(1, " + fd + "), " + keyp + ", " + flag + ");";
         } else {
           if (memb_name == "lookup") {
             prefix = "bpf_map_lookup_elem";
@@ -882,6 +918,15 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
             suffix = ")";
           } else if (memb_name == "redirect_map") {
             prefix = "bpf_redirect_map";
+            suffix = ")";
+          } else if (memb_name == "sk_storage_get") {
+            prefix = "bpf_sk_storage_get";
+            suffix = ")";
+          } else if (memb_name == "sk_storage_delete") {
+            prefix = "bpf_sk_storage_delete";
+            suffix = ")";
+          } else if (memb_name == "get_local_storage") {
+            prefix = "bpf_get_local_storage";
             suffix = ")";
           } else {
             error(GET_BEGINLOC(Call), "invalid bpf_table operation %0") << memb_name;
@@ -1132,7 +1177,7 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
 
     TableDesc table;
     TableStorage::iterator table_it;
-    table.name = Decl->getName();
+    table.name = string(Decl->getName());
     Path local_path({fe_.id(), table.name});
     Path maps_ns_path({"ns", fe_.maps_ns(), table.name});
     Path global_path({table.name});
@@ -1168,46 +1213,95 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
       ++i;
     }
 
+    std::string section_attr = string(A->getName());
+    size_t pinned_path_pos = section_attr.find(":");
+    unsigned int pinned_id = 0; // 0 is not a valid map ID, they start with 1
+
+    if (pinned_path_pos != std::string::npos) {
+      std::string pinned = section_attr.substr(pinned_path_pos + 1);
+      section_attr = section_attr.substr(0, pinned_path_pos);
+      int fd = bpf_obj_get(pinned.c_str());
+      struct bpf_map_info info = {};
+      unsigned int info_len = sizeof(info);
+
+      if (bpf_obj_get_info_by_fd(fd, &info, &info_len)) {
+        error(GET_BEGINLOC(Decl), "map not found: %0") << pinned;
+        return false;
+      }
+
+      close(fd);
+      pinned_id = info.id;
+    }
+
+    // Additional map specific information
+    size_t map_info_pos = section_attr.find("$");
+    std::string inner_map_name;
+
+    if (map_info_pos != std::string::npos) {
+      std::string map_info = section_attr.substr(map_info_pos + 1);
+      section_attr = section_attr.substr(0, map_info_pos);
+      if (section_attr == "maps/array_of_maps" ||
+          section_attr == "maps/hash_of_maps") {
+        inner_map_name = map_info;
+      }
+    }
+
     bpf_map_type map_type = BPF_MAP_TYPE_UNSPEC;
-    if (A->getName() == "maps/hash") {
+    if (section_attr == "maps/hash") {
       map_type = BPF_MAP_TYPE_HASH;
-    } else if (A->getName() == "maps/array") {
+    } else if (section_attr == "maps/array") {
       map_type = BPF_MAP_TYPE_ARRAY;
-    } else if (A->getName() == "maps/percpu_hash") {
+    } else if (section_attr == "maps/percpu_hash") {
       map_type = BPF_MAP_TYPE_PERCPU_HASH;
-    } else if (A->getName() == "maps/percpu_array") {
+    } else if (section_attr == "maps/percpu_array") {
       map_type = BPF_MAP_TYPE_PERCPU_ARRAY;
-    } else if (A->getName() == "maps/lru_hash") {
+    } else if (section_attr == "maps/lru_hash") {
       map_type = BPF_MAP_TYPE_LRU_HASH;
-    } else if (A->getName() == "maps/lru_percpu_hash") {
+    } else if (section_attr == "maps/lru_percpu_hash") {
       map_type = BPF_MAP_TYPE_LRU_PERCPU_HASH;
-    } else if (A->getName() == "maps/lpm_trie") {
+    } else if (section_attr == "maps/lpm_trie") {
       map_type = BPF_MAP_TYPE_LPM_TRIE;
-    } else if (A->getName() == "maps/histogram") {
+    } else if (section_attr == "maps/histogram") {
       map_type = BPF_MAP_TYPE_HASH;
       if (key_type->isSpecificBuiltinType(BuiltinType::Int))
         map_type = BPF_MAP_TYPE_ARRAY;
       if (!leaf_type->isSpecificBuiltinType(BuiltinType::ULongLong))
         error(GET_BEGINLOC(Decl), "histogram leaf type must be u64, got %0") << leaf_type;
-    } else if (A->getName() == "maps/prog") {
+    } else if (section_attr == "maps/prog") {
       map_type = BPF_MAP_TYPE_PROG_ARRAY;
-    } else if (A->getName() == "maps/perf_output") {
+    } else if (section_attr == "maps/perf_output") {
       map_type = BPF_MAP_TYPE_PERF_EVENT_ARRAY;
       int numcpu = get_possible_cpus().size();
       if (numcpu <= 0)
         numcpu = 1;
       table.max_entries = numcpu;
-    } else if (A->getName() == "maps/perf_array") {
+    } else if (section_attr == "maps/perf_array") {
       map_type = BPF_MAP_TYPE_PERF_EVENT_ARRAY;
-    } else if (A->getName() == "maps/cgroup_array") {
+    } else if (section_attr == "maps/cgroup_array") {
       map_type = BPF_MAP_TYPE_CGROUP_ARRAY;
-    } else if (A->getName() == "maps/stacktrace") {
+    } else if (section_attr == "maps/stacktrace") {
       map_type = BPF_MAP_TYPE_STACK_TRACE;
-    } else if (A->getName() == "maps/devmap") {
+    } else if (section_attr == "maps/devmap") {
       map_type = BPF_MAP_TYPE_DEVMAP;
-    } else if (A->getName() == "maps/cpumap") {
+    } else if (section_attr == "maps/cpumap") {
       map_type = BPF_MAP_TYPE_CPUMAP;
-    } else if (A->getName() == "maps/extern") {
+    } else if (section_attr == "maps/xskmap") {
+      map_type = BPF_MAP_TYPE_XSKMAP;
+    } else if (section_attr == "maps/hash_of_maps") {
+      map_type = BPF_MAP_TYPE_HASH_OF_MAPS;
+    } else if (section_attr == "maps/array_of_maps") {
+      map_type = BPF_MAP_TYPE_ARRAY_OF_MAPS;
+    } else if (section_attr == "maps/sk_storage") {
+      map_type = BPF_MAP_TYPE_SK_STORAGE;
+    } else if (section_attr == "maps/sockmap") {
+      map_type = BPF_MAP_TYPE_SOCKMAP;
+    } else if (section_attr == "maps/sockhash") {
+      map_type = BPF_MAP_TYPE_SOCKHASH;
+    } else if (section_attr == "maps/cgroup_storage") {
+      map_type = BPF_MAP_TYPE_CGROUP_STORAGE;
+    } else if (section_attr == "maps/percpu_cgroup_storage") {
+      map_type = BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE;
+    } else if (section_attr == "maps/extern") {
       if (!fe_.table_storage().Find(maps_ns_path, table_it)) {
         if (!fe_.table_storage().Find(global_path, table_it)) {
           error(GET_BEGINLOC(Decl), "reference to undefined table");
@@ -1216,7 +1310,7 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
       }
       table = table_it->second.dup();
       table.is_extern = true;
-    } else if (A->getName() == "maps/export") {
+    } else if (section_attr == "maps/export") {
       if (table.name.substr(0, 2) == "__")
         table.name = table.name.substr(2);
       Path local_path({fe_.id(), table.name});
@@ -1227,7 +1321,7 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
       }
       fe_.table_storage().Insert(global_path, table_it->second.dup());
       return true;
-    } else if(A->getName() == "maps/shared") {
+    } else if(section_attr == "maps/shared") {
       if (table.name.substr(0, 2) == "__")
         table.name = table.name.substr(2);
       Path local_path({fe_.id(), table.name});
@@ -1242,7 +1336,7 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
 
     if (!table.is_extern) {
       if (map_type == BPF_MAP_TYPE_UNSPEC) {
-        error(GET_BEGINLOC(Decl), "unsupported map type: %0") << A->getName();
+        error(GET_BEGINLOC(Decl), "unsupported map type: %0") << section_attr;
         return false;
       }
 
@@ -1250,7 +1344,8 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
       table.fake_fd = fe_.get_next_fake_fd();
       fe_.add_map_def(table.fake_fd, std::make_tuple((int)map_type, std::string(table.name),
                       (int)table.key_size, (int)table.leaf_size,
-                      (int)table.max_entries, table.flags));
+                      (int)table.max_entries, table.flags, pinned_id,
+                      inner_map_name));
     }
 
     if (!table.is_extern)

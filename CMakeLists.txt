@@ -27,9 +27,14 @@ option(ENABLE_RTTI "Enable compiling with real time type information" OFF)
 option(ENABLE_LLVM_SHARED "Enable linking LLVM as a shared library" OFF)
 option(ENABLE_CLANG_JIT "Enable Loading BPF through Clang Frontend" ON)
 option(ENABLE_USDT "Enable User-level Statically Defined Tracing" ON)
+option(ENABLE_MAN "Build man pages" ON)
 CMAKE_DEPENDENT_OPTION(ENABLE_CPP_API "Enable C++ API" ON "ENABLE_USDT" OFF)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+
+if (CMAKE_USE_LIBBPF_PACKAGE)
+  find_package(LibBpf)
+endif()
 
 if(NOT PYTHON_ONLY AND ENABLE_CLANG_JIT)
 find_package(BISON)
@@ -37,6 +42,11 @@ find_package(FLEX)
 find_package(LLVM REQUIRED CONFIG)
 message(STATUS "Found LLVM: ${LLVM_INCLUDE_DIRS} ${LLVM_PACKAGE_VERSION}")
 find_package(LibElf REQUIRED)
+
+if(CLANG_DIR)
+  set(CMAKE_FIND_ROOT_PATH "${CLANG_DIR}")
+  include_directories("${CLANG_DIR}/include")
+endif()
 
 # clang is linked as a library, but the library path searching is
 # primitively supported, unlike libLLVM
@@ -85,7 +95,7 @@ if (USINGISYSTEM AND GCC_VERSION VERSION_LESS 6.0)
 endif()
 
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 14)
 
 endif(NOT PYTHON_ONLY AND ENABLE_CLANG_JIT)
 
@@ -96,7 +106,9 @@ add_subdirectory(src)
 add_subdirectory(introspection)
 if(ENABLE_CLANG_JIT)
 add_subdirectory(examples)
+if(ENABLE_MAN)
 add_subdirectory(man)
+endif(ENABLE_MAN)
 add_subdirectory(tests)
 add_subdirectory(tools)
 endif(ENABLE_CLANG_JIT)

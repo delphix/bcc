@@ -214,7 +214,8 @@ static Elf_Scn * get_section(Elf *e, const char *section_name,
 
 static int list_in_scn(Elf *e, Elf_Scn *section, size_t stridx, size_t symsize,
                        struct bcc_symbol_option *option,
-                       bcc_elf_symcb callback, void *payload) {
+                       bcc_elf_symcb callback, bcc_elf_symcb_lazy callback_lazy,
+                       void *payload, bool debugfile) {
   Elf_Data *data = NULL;
 
 #if defined(__powerpc64__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
@@ -237,6 +238,7 @@ static int list_in_scn(Elf *e, Elf_Scn *section, size_t stridx, size_t symsize,
     for (i = 0; i < symcount; ++i) {
       GElf_Sym sym;
       const char *name;
+      size_t name_len;
 
       if (!gelf_getsym(data, (int)i, &sym))
         continue;
@@ -245,6 +247,7 @@ static int list_in_scn(Elf *e, Elf_Scn *section, size_t stridx, size_t symsize,
         continue;
       if (name[0] == 0)
         continue;
+      name_len = strlen(name);
 
       if (sym.st_value == 0)
         continue;
@@ -287,7 +290,13 @@ static int list_in_scn(Elf *e, Elf_Scn *section, size_t stridx, size_t symsize,
 #endif
 #endif
 
-      if (callback(name, sym.st_value, sym.st_size, payload) < 0)
+      int ret;
+      if (option->lazy_symbolize)
+        ret = callback_lazy(stridx, sym.st_name, name_len, sym.st_value,
+                            sym.st_size, debugfile, payload);
+      else
+        ret = callback(name, sym.st_value, sym.st_size, payload);
+      if (ret < 0)
         return 1;      // signal termination to caller
     }
   }
@@ -295,8 +304,9 @@ static int list_in_scn(Elf *e, Elf_Scn *section, size_t stridx, size_t symsize,
   return 0;
 }
 
-static int listsymbols(Elf *e, bcc_elf_symcb callback, void *payload,
-                       struct bcc_symbol_option *option) {
+static int listsymbols(Elf *e, bcc_elf_symcb callback,
+                       bcc_elf_symcb_lazy callback_lazy, void *payload,
+                       struct bcc_symbol_option *option, bool debugfile) {
   Elf_Scn *section = NULL;
 
   while ((section = elf_nextscn(e, section)) != 0) {
@@ -309,7 +319,7 @@ static int listsymbols(Elf *e, bcc_elf_symcb callback, void *payload,
       continue;
 
     int rc = list_in_scn(e, section, header.sh_link, header.sh_entsize,
-                         option, callback, payload);
+                         option, callback, callback_lazy, payload, debugfile);
     if (rc == 1)
       break;    // callback signaled termination
 
@@ -536,7 +546,56 @@ static char *find_debug_via_buildid(Elf *e) {
   return NULL;
 }
 
+static char *find_debug_via_symfs(Elf *e, const char* path) {
+  char fullpath[PATH_MAX];
+  char buildid[128];
+  char symfs_buildid[128];
+  int check_build_id;
+  char *symfs;
+  Elf *symfs_e = NULL;
+  int symfs_fd = -1;
+  char *result = NULL;
+
+  symfs = getenv("BCC_SYMFS");
+  if (!symfs || !*symfs)
+    goto out;
+
+  check_build_id = find_buildid(e, buildid);
+
+  snprintf(fullpath, sizeof(fullpath), "%s/%s", symfs, path);
+  if (access(fullpath, F_OK) == -1)
+    goto out;
+
+  if (openelf(fullpath, &symfs_e, &symfs_fd) < 0) {
+    symfs_e = NULL;
+    symfs_fd = -1;
+    goto out;
+  }
+
+  if (check_build_id) {
+    if (!find_buildid(symfs_e, symfs_buildid))
+      goto out;
+
+    if (strncmp(buildid, symfs_buildid, sizeof(buildid)))
+      goto out;
+  }
+
+  result = strdup(fullpath);
+
+out:
+  if (symfs_e) {
+    elf_end(symfs_e);
+  }
+
+  if (symfs_fd != -1) {
+    close(symfs_fd);
+  }
+
+  return result;
+}
+
 static int foreach_sym_core(const char *path, bcc_elf_symcb callback,
+                            bcc_elf_symcb_lazy callback_lazy,
                             struct bcc_symbol_option *option, void *payload,
                             int is_debug_file) {
   Elf *e;
@@ -550,23 +609,27 @@ static int foreach_sym_core(const char *path, bcc_elf_symcb callback,
     return -1;
 
   // If there is a separate debuginfo file, try to locate and read it, first
-  // using the build-id section, then using the debuglink section. These are
-  // also the rules that GDB folows.
-  // See: https://sourceware.org/gdb/onlinedocs/gdb/Separate-Debug-Files.html
+  // using symfs, then using the build-id section, finally using the debuglink
+  // section. These rules are what perf and gdb follow.
+  // See:
+  // - https://github.com/torvalds/linux/blob/v5.2/tools/perf/Documentation/perf-report.txt#L325
+  // - https://sourceware.org/gdb/onlinedocs/gdb/Separate-Debug-Files.html
   if (option->use_debug_file && !is_debug_file) {
     // The is_debug_file argument helps avoid infinitely resolving debuginfo
     // files for debuginfo files and so on.
-    debug_file = find_debug_via_buildid(e);
+    debug_file = find_debug_via_symfs(e, path);
+    if (!debug_file)
+      debug_file = find_debug_via_buildid(e);
     if (!debug_file)
       debug_file = find_debug_via_debuglink(e, path,
                                             option->check_debug_file_crc);
     if (debug_file) {
-      foreach_sym_core(debug_file, callback, option, payload, 1);
+      foreach_sym_core(debug_file, callback, callback_lazy, option, payload, 1);
       free(debug_file);
     }
   }
 
-  res = listsymbols(e, callback, payload, option);
+  res = listsymbols(e, callback, callback_lazy, payload, option, is_debug_file);
   elf_end(e);
   close(fd);
   return res;
@@ -574,8 +637,16 @@ static int foreach_sym_core(const char *path, bcc_elf_symcb callback,
 
 int bcc_elf_foreach_sym(const char *path, bcc_elf_symcb callback,
                         void *option, void *payload) {
-  return foreach_sym_core(
-      path, callback, (struct bcc_symbol_option*)option, payload, 0);
+  struct bcc_symbol_option *o = option;
+  o->lazy_symbolize = 0;
+  return foreach_sym_core(path, callback, NULL, o, payload, 0);
+}
+
+int bcc_elf_foreach_sym_lazy(const char *path, bcc_elf_symcb_lazy callback,
+                        void *option, void *payload) {
+  struct bcc_symbol_option *o = option;
+  o->lazy_symbolize = 1;
+  return foreach_sym_core(path, NULL, callback, o, payload, 0);
 }
 
 int bcc_elf_get_text_scn_info(const char *path, uint64_t *addr,
@@ -684,17 +755,17 @@ int bcc_elf_is_vdso(const char *name) {
 // >0: Initialized
 static int vdso_image_fd = -1;
 
-static int find_vdso(const char *name, uint64_t st, uint64_t en,
-                     uint64_t offset, bool enter_ns, void *payload) {
+static int find_vdso(struct mod_info *info, int enter_ns, void *payload) {
   int fd;
   char tmpfile[128];
-  if (!bcc_elf_is_vdso(name))
+  if (!bcc_elf_is_vdso(info->name))
     return 0;
 
-  void *image = malloc(en - st);
+  uint64_t sz = info->end_addr - info->start_addr;
+  void *image = malloc(sz);
   if (!image)
     goto on_error;
-  memcpy(image, (void *)st, en - st);
+  memcpy(image, (void *)info->start_addr, sz);
 
   snprintf(tmpfile, sizeof(tmpfile), "/tmp/bcc_%d_vdso_image_XXXXXX", getpid());
   fd = mkostemp(tmpfile, O_CLOEXEC);
@@ -706,7 +777,7 @@ static int find_vdso(const char *name, uint64_t st, uint64_t en,
   if (unlink(tmpfile) == -1)
     fprintf(stderr, "Unlink %s failed: %s\n", tmpfile, strerror(errno));
 
-  if (write(fd, image, en - st) == -1) {
+  if (write(fd, image, sz) == -1) {
     fprintf(stderr, "Failed to write to vDSO image: %s\n", strerror(errno));
     close(fd);
     goto on_error;
@@ -738,7 +809,7 @@ int bcc_elf_foreach_vdso_sym(bcc_elf_symcb callback, void *payload) {
   if (openelf_fd(vdso_image_fd, &elf) == -1)
     return -1;
 
-  return listsymbols(elf, callback, payload, &default_option);
+  return listsymbols(elf, callback, NULL, payload, &default_option, 0);
 }
 
 // return value: 0   : success
@@ -909,6 +980,63 @@ int bcc_elf_get_buildid(const char *path, char *buildid)
     return -1;
 
   return 0;
+}
+
+int bcc_elf_symbol_str(const char *path, size_t section_idx,
+                       size_t str_table_idx, char *out, size_t len,
+                       int debugfile)
+{
+  Elf *e = NULL, *d = NULL;
+  int fd = -1, dfd = -1, err = 0;
+  const char *name;
+  char *debug_file = NULL;
+
+  if (!out)
+    return -1;
+
+  if (openelf(path, &e, &fd) < 0)
+    return -1;
+
+  if (debugfile) {
+    debug_file = find_debug_via_buildid(e);
+    if (!debug_file)
+      debug_file = find_debug_via_debuglink(e, path, 0); // No crc for speed
+
+    if (!debug_file) {
+      err = -1;
+      goto exit;
+    }
+
+    if (openelf(debug_file, &d, &dfd) < 0) {
+      err = -1;
+      goto exit;
+    }
+
+    if ((name = elf_strptr(d, section_idx, str_table_idx)) == NULL) {
+      err = -1;
+      goto exit;
+    }
+  } else {
+    if ((name = elf_strptr(e, section_idx, str_table_idx)) == NULL) {
+      err = -1;
+      goto exit;
+    }
+  }
+
+  strncpy(out, name, len);
+
+exit:
+  if (debug_file)
+    free(debug_file);
+  if (e)
+    elf_end(e);
+  if (d)
+    elf_end(d);
+  if (fd >= 0)
+    close(fd);
+  if (dfd >= 0)
+    close(dfd);
+  return err;
 }
 
 #if 0

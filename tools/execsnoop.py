@@ -4,7 +4,8 @@
 # execsnoop Trace new processes via exec() syscalls.
 #           For Linux, uses BCC, eBPF. Embedded C.
 #
-# USAGE: execsnoop [-h] [-t] [-x] [-n NAME]
+# USAGE: execsnoop [-h] [-T] [-t] [-x] [-q] [-n NAME] [-l LINE]
+#                  [--max-args MAX_ARGS]
 #
 # This currently will print up to a maximum of 19 arguments, plus the process
 # name, so 20 fields in total (MAXARG).
@@ -24,24 +25,31 @@ import argparse
 import re
 import time
 from collections import defaultdict
+from time import strftime
 
 # arguments
 examples = """examples:
     ./execsnoop           # trace all exec() syscalls
     ./execsnoop -x        # include failed exec()s
+    ./execsnoop -T        # include time (HH:MM:SS)
     ./execsnoop -t        # include timestamps
     ./execsnoop -q        # add "quotemarks" around arguments
     ./execsnoop -n main   # only print command lines containing "main"
     ./execsnoop -l tpkg   # only print command where arguments contains "tpkg"
+    ./opensnoop --cgroupmap ./mappath  # only trace cgroups in this BPF map
 """
 parser = argparse.ArgumentParser(
     description="Trace exec() syscalls",
     formatter_class=argparse.RawDescriptionHelpFormatter,
     epilog=examples)
+parser.add_argument("-T", "--time", action="store_true",
+    help="include time column on output (HH:MM:SS)")
 parser.add_argument("-t", "--timestamp", action="store_true",
     help="include timestamp on output")
 parser.add_argument("-x", "--fails", action="store_true",
     help="include failed exec()s")
+parser.add_argument("--cgroupmap",
+    help="trace cgroups in this BPF map only")
 parser.add_argument("-q", "--quote", action="store_true",
     help="Add quotemarks (\") around arguments."
     )
@@ -79,6 +87,9 @@ struct data_t {
     int retval;
 };
 
+#if CGROUPSET
+BPF_TABLE_PINNED("hash", u64, u64, cgroupset, 1024, "CGROUPPATH");
+#endif
 BPF_PERF_OUTPUT(events);
 
 static int __submit_arg(struct pt_regs *ctx, void *ptr, struct data_t *data)
@@ -103,6 +114,13 @@ int syscall__execve(struct pt_regs *ctx,
     const char __user *const __user *__argv,
     const char __user *const __user *__envp)
 {
+#if CGROUPSET
+    u64 cgroupid = bpf_get_current_cgroup_id();
+    if (cgroupset.lookup(&cgroupid) == NULL) {
+      return 0;
+    }
+#endif
+
     // create data here and pass to submit_arg to save stack space (#555)
     struct data_t data = {};
     struct task_struct *task;
@@ -136,6 +154,13 @@ out:
 
 int do_ret_sys_execve(struct pt_regs *ctx)
 {
+#if CGROUPSET
+    u64 cgroupid = bpf_get_current_cgroup_id();
+    if (cgroupset.lookup(&cgroupid) == NULL) {
+      return 0;
+    }
+#endif
+
     struct data_t data = {};
     struct task_struct *task;
 
@@ -157,6 +182,11 @@ int do_ret_sys_execve(struct pt_regs *ctx)
 """
 
 bpf_text = bpf_text.replace("MAXARG", args.max_args)
+if args.cgroupmap:
+    bpf_text = bpf_text.replace('CGROUPSET', '1')
+    bpf_text = bpf_text.replace('CGROUPPATH', args.cgroupmap)
+else:
+    bpf_text = bpf_text.replace('CGROUPSET', '0')
 if args.ebpf:
     print(bpf_text)
     exit()
@@ -168,6 +198,8 @@ b.attach_kprobe(event=execve_fnname, fn_name="syscall__execve")
 b.attach_kretprobe(event=execve_fnname, fn_name="do_ret_sys_execve")
 
 # header
+if args.time:
+    print("%-9s" % ("TIME"), end="")
 if args.timestamp:
     print("%-8s" % ("TIME(s)"), end="")
 print("%-16s %-6s %-6s %3s %s" % ("PCOMM", "PID", "PPID", "RET", "ARGS"))
@@ -215,6 +247,8 @@ def print_event(cpu, data, size):
             ]
 
         if not skip:
+            if args.time:
+                printb(b"%-9s" % strftime("%H:%M:%S").encode('ascii'), nl="")
             if args.timestamp:
                 printb(b"%-8.3f" % (time.time() - start_ts), nl="")
             ppid = event.ppid if event.ppid > 0 else get_ppid(event.pid)

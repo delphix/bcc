@@ -22,7 +22,6 @@ import re
 import struct
 import errno
 import sys
-basestring = (unicode if sys.version_info[0] < 3 else str)
 
 from .libbcc import lib, bcc_symbol, bcc_symbol_option, bcc_stacktrace_build_id, _SYM_CB_TYPE
 from .table import Table, PerfEventArray
@@ -30,6 +29,11 @@ from .perf import Perf
 from .utils import get_online_cpus, printb, _assert_is_bytes, ArgString
 from .version import __version__
 from .disassembler import disassemble_prog, decode_map
+
+try:
+    basestring
+except NameError:  # Python 3
+    basestring = str
 
 _probe_limit = 1000
 _num_open_probes = 0
@@ -178,6 +182,8 @@ class BPF(object):
         b"__x32_compat_sys_",
         b"__ia32_compat_sys_",
         b"__arm64_sys_",
+        b"__s390x_sys_",
+        b"__s390_sys_",
     ]
 
     # BPF timestamps come from the monotonic clock. To be able to filter
@@ -272,7 +278,7 @@ class BPF(object):
         return None
 
     def __init__(self, src_file=b"", hdr_file=b"", text=None, debug=0,
-            cflags=[], usdt_contexts=[], allow_rlimit=True):
+            cflags=[], usdt_contexts=[], allow_rlimit=True, device=None):
         """Create a new BPF module with the given source code.
 
         Note:
@@ -291,6 +297,8 @@ class BPF(object):
         hdr_file = _assert_is_bytes(hdr_file)
         text = _assert_is_bytes(text)
 
+        assert not (text and src_file)
+
         self.kprobe_fds = {}
         self.uprobe_fds = {}
         self.tracepoint_fds = {}
@@ -306,7 +314,21 @@ class BPF(object):
         self.module = None
         cflags_array = (ct.c_char_p * len(cflags))()
         for i, s in enumerate(cflags): cflags_array[i] = bytes(ArgString(s))
-        if text:
+
+        if src_file:
+            src_file = BPF._find_file(src_file)
+            hdr_file = BPF._find_file(hdr_file)
+
+        # files that end in ".b" are treated as B files. Everything else is a (BPF-)C file
+        if src_file.endswith(b".b"):
+            self.module = lib.bpf_module_create_b(src_file, hdr_file, self.debug, device)
+        else:
+            if src_file:
+                # Read the BPF C source file into the text variable. This ensures,
+                # that files and inline text are treated equally.
+                with open(src_file, mode="rb") as file:
+                    text = file.read()
+
             ctx_array = (ct.c_void_p * len(usdt_contexts))()
             for i, usdt in enumerate(usdt_contexts):
                 ctx_array[i] = ct.c_void_p(usdt.get_context())
@@ -318,22 +340,13 @@ class BPF(object):
                                 "locations")
             text = usdt_text + text
 
-        if text:
+
             self.module = lib.bpf_module_create_c_from_string(text,
-                    self.debug, cflags_array, len(cflags_array), allow_rlimit)
-            if not self.module:
-                raise Exception("Failed to compile BPF text")
-        else:
-            src_file = BPF._find_file(src_file)
-            hdr_file = BPF._find_file(hdr_file)
-            if src_file.endswith(b".b"):
-                self.module = lib.bpf_module_create_b(src_file, hdr_file,
-                        self.debug)
-            else:
-                self.module = lib.bpf_module_create_c(src_file, self.debug,
-                        cflags_array, len(cflags_array), allow_rlimit)
-            if not self.module:
-                raise Exception("Failed to compile BPF module %s" % src_file)
+                                                              self.debug,
+                                                              cflags_array, len(cflags_array),
+                                                              allow_rlimit, device)
+        if not self.module:
+            raise Exception("Failed to compile BPF module %s" % (src_file or "<text>"))
 
         for usdt_context in usdt_contexts:
             usdt_context.attach_uprobes(self)
@@ -356,7 +369,7 @@ class BPF(object):
 
         return fns
 
-    def load_func(self, func_name, prog_type):
+    def load_func(self, func_name, prog_type, device = None):
         func_name = _assert_is_bytes(func_name)
         if func_name in self.funcs:
             return self.funcs[func_name]
@@ -372,7 +385,7 @@ class BPF(object):
                 lib.bpf_function_size(self.module, func_name),
                 lib.bpf_module_license(self.module),
                 lib.bpf_module_kern_version(self.module),
-                log_level, None, 0);
+                log_level, None, 0, device);
 
         if fd < 0:
             atexit.register(self.donothing)
@@ -565,7 +578,7 @@ class BPF(object):
                 elif fn.startswith(b'__perf') or fn.startswith(b'perf_'):
                     continue
                 # Exclude all gcc 8's extra .cold functions
-                elif re.match(b'^.*\.cold\.\d+$', fn):
+                elif re.match(b'^.*\.cold(\.\d+)?$', fn):
                     continue
                 if (t.lower() in [b't', b'w']) and re.match(event_re, fn) \
                     and fn not in blacklist:
@@ -731,7 +744,7 @@ class BPF(object):
 
 
     @classmethod
-    def _check_path_symbol(cls, module, symname, addr, pid):
+    def _check_path_symbol(cls, module, symname, addr, pid, sym_off=0):
         module = _assert_is_bytes(module)
         symname = _assert_is_bytes(symname)
         sym = bcc_symbol()
@@ -743,9 +756,10 @@ class BPF(object):
             ct.byref(sym),
         ) < 0:
             raise Exception("could not determine address of symbol %s" % symname)
+        new_addr = sym.offset + sym_off
         module_path = ct.cast(sym.module, ct.c_char_p).value
         lib.bcc_procutils_free(sym.module)
-        return module_path, sym.offset
+        return module_path, new_addr
 
     @staticmethod
     def find_library(libname):
@@ -857,7 +871,7 @@ class BPF(object):
 
     @staticmethod
     def support_raw_tracepoint():
-        # kernel symbol "bpf_find_raw_tracepoint" indicates raw_tracepint support
+        # kernel symbol "bpf_find_raw_tracepoint" indicates raw_tracepoint support
         if BPF.ksymname("bpf_find_raw_tracepoint") != -1 or \
            BPF.ksymname("bpf_get_raw_tracepoint") != -1:
             return True
@@ -963,13 +977,15 @@ class BPF(object):
             return b"%s_%s_0x%x_%d" % (prefix, self._probe_repl.sub(b"_", path), addr, pid)
 
     def attach_uprobe(self, name=b"", sym=b"", sym_re=b"", addr=None,
-            fn_name=b"", pid=-1):
+            fn_name=b"", pid=-1, sym_off=0):
         """attach_uprobe(name="", sym="", sym_re="", addr=None, fn_name=""
-                         pid=-1)
+                         pid=-1, sym_off=0)
 
         Run the bpf function denoted by fn_name every time the symbol sym in
         the library or binary 'name' is encountered. Optional parameters pid,
         cpu, and group_fd can be used to filter the probe.
+
+        If sym_off is given, attach uprobe to offset within the symbol.
 
         The real address addr may be supplied in place of sym, in which case sym
         must be set to its default value. If the file is a non-PIE executable,
@@ -989,6 +1005,10 @@ class BPF(object):
                  BPF(text).attach_uprobe("/usr/bin/python", "main")
         """
 
+        assert sym_off >= 0
+        if addr is not None:
+            assert sym_off == 0, "offset with addr is not supported"
+
         name = _assert_is_bytes(name)
         sym = _assert_is_bytes(sym)
         sym_re = _assert_is_bytes(sym_re)
@@ -1002,7 +1022,7 @@ class BPF(object):
                                    fn_name=fn_name, pid=pid)
             return
 
-        (path, addr) = BPF._check_path_symbol(name, sym, addr, pid)
+        (path, addr) = BPF._check_path_symbol(name, sym, addr, pid, sym_off)
 
         self._check_probe_quota(1)
         fn = self.load_func(fn_name, BPF.KPROBE)
@@ -1056,7 +1076,7 @@ class BPF(object):
             raise Exception("Failed to detach BPF from uprobe")
         self._del_uprobe_fd(ev_name)
 
-    def detach_uprobe(self, name=b"", sym=b"", addr=None, pid=-1):
+    def detach_uprobe(self, name=b"", sym=b"", addr=None, pid=-1, sym_off=0):
         """detach_uprobe(name="", sym="", addr=None, pid=-1)
 
         Stop running a bpf function that is attached to symbol 'sym' in library
@@ -1065,7 +1085,7 @@ class BPF(object):
 
         name = _assert_is_bytes(name)
         sym = _assert_is_bytes(sym)
-        (path, addr) = BPF._check_path_symbol(name, sym, addr, pid)
+        (path, addr) = BPF._check_path_symbol(name, sym, addr, pid, sym_off)
         ev_name = self._get_uprobe_evname(b"p", path, addr, pid)
         self.detach_uprobe_event(ev_name)
 
@@ -1344,6 +1364,9 @@ class BPF(object):
         if self.tracefile:
             self.tracefile.close()
             self.tracefile = None
+        for name, fn in list(self.funcs.items()):
+            os.close(fn.fd)
+            del self.funcs[name]
         if self.module:
             lib.bpf_module_destroy(self.module)
             self.module = None

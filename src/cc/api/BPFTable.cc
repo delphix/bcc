@@ -255,9 +255,11 @@ BPFStackTable::BPFStackTable(const TableDesc& desc, bool use_debug_file,
     throw std::invalid_argument("Table '" + desc.name +
                                 "' is not a stack table");
 
+  uint32_t use_symbol_type = (1 << STT_FUNC) | (1 << STT_GNU_IFUNC);
   symbol_option_ = {.use_debug_file = use_debug_file,
                     .check_debug_file_crc = check_debug_file_crc,
-                    .use_symbol_type = (1 << STT_FUNC) | (1 << STT_GNU_IFUNC)};
+                    .lazy_symbolize = 1,
+                    .use_symbol_type = use_symbol_type};
 }
 
 BPFStackTable::BPFStackTable(BPFStackTable&& that)
@@ -327,6 +329,7 @@ BPFStackBuildIdTable::BPFStackBuildIdTable(const TableDesc& desc, bool use_debug
 
   symbol_option_ = {.use_debug_file = use_debug_file,
                     .check_debug_file_crc = check_debug_file_crc,
+                    .lazy_symbolize = 1,
                     .use_symbol_type = (1 << STT_FUNC) | (1 << STT_GNU_IFUNC)};
 }
 
@@ -624,21 +627,21 @@ StatusTuple BPFCgroupArray::remove_value(const int& index) {
   return StatusTuple(0);
 }
 
-BPFDevmapTable::BPFDevmapTable(const TableDesc& desc) 
+BPFDevmapTable::BPFDevmapTable(const TableDesc& desc)
     : BPFTableBase<int, int>(desc) {
     if(desc.type != BPF_MAP_TYPE_DEVMAP)
-      throw std::invalid_argument("Table '" + desc.name + 
+      throw std::invalid_argument("Table '" + desc.name +
                                   "' is not a devmap table");
 }
 
-StatusTuple BPFDevmapTable::update_value(const int& index, 
+StatusTuple BPFDevmapTable::update_value(const int& index,
                                          const int& value) {
     if (!this->update(const_cast<int*>(&index), const_cast<int*>(&value)))
       return StatusTuple(-1, "Error updating value: %s", std::strerror(errno));
     return StatusTuple(0);
 }
 
-StatusTuple BPFDevmapTable::get_value(const int& index, 
+StatusTuple BPFDevmapTable::get_value(const int& index,
                                       int& value) {
     if (!this->lookup(const_cast<int*>(&index), &value))
       return StatusTuple(-1, "Error getting value: %s", std::strerror(errno));
@@ -647,6 +650,94 @@ StatusTuple BPFDevmapTable::get_value(const int& index,
 
 StatusTuple BPFDevmapTable::remove_value(const int& index) {
     if (!this->remove(const_cast<int*>(&index)))
+      return StatusTuple(-1, "Error removing value: %s", std::strerror(errno));
+    return StatusTuple(0);
+}
+
+BPFXskmapTable::BPFXskmapTable(const TableDesc& desc)
+    : BPFTableBase<int, int>(desc) {
+    if(desc.type != BPF_MAP_TYPE_XSKMAP)
+      throw std::invalid_argument("Table '" + desc.name +
+                                  "' is not a xskmap table");
+}
+
+StatusTuple BPFXskmapTable::update_value(const int& index,
+                                         const int& value) {
+    if (!this->update(const_cast<int*>(&index), const_cast<int*>(&value)))
+      return StatusTuple(-1, "Error updating value: %s", std::strerror(errno));
+    return StatusTuple(0);
+}
+
+StatusTuple BPFXskmapTable::get_value(const int& index,
+                                      int& value) {
+    if (!this->lookup(const_cast<int*>(&index), &value))
+      return StatusTuple(-1, "Error getting value: %s", std::strerror(errno));
+    return StatusTuple(0);
+}
+
+StatusTuple BPFXskmapTable::remove_value(const int& index) {
+    if (!this->remove(const_cast<int*>(&index)))
+      return StatusTuple(-1, "Error removing value: %s", std::strerror(errno));
+    return StatusTuple(0);
+}
+
+BPFMapInMapTable::BPFMapInMapTable(const TableDesc& desc)
+    : BPFTableBase<int, int>(desc) {
+    if(desc.type != BPF_MAP_TYPE_ARRAY_OF_MAPS &&
+       desc.type != BPF_MAP_TYPE_HASH_OF_MAPS)
+      throw std::invalid_argument("Table '" + desc.name +
+                                  "' is not a map-in-map table");
+}
+
+StatusTuple BPFMapInMapTable::update_value(const int& index,
+                                           const int& inner_map_fd) {
+    if (!this->update(const_cast<int*>(&index), const_cast<int*>(&inner_map_fd)))
+      return StatusTuple(-1, "Error updating value: %s", std::strerror(errno));
+    return StatusTuple(0);
+}
+
+StatusTuple BPFMapInMapTable::remove_value(const int& index) {
+    if (!this->remove(const_cast<int*>(&index)))
+      return StatusTuple(-1, "Error removing value: %s", std::strerror(errno));
+    return StatusTuple(0);
+}
+
+BPFSockmapTable::BPFSockmapTable(const TableDesc& desc)
+    : BPFTableBase<int, int>(desc) {
+    if(desc.type != BPF_MAP_TYPE_SOCKMAP)
+      throw std::invalid_argument("Table '" + desc.name +
+                                  "' is not a sockmap table");
+}
+
+StatusTuple BPFSockmapTable::update_value(const int& index,
+                                         const int& value) {
+    if (!this->update(const_cast<int*>(&index), const_cast<int*>(&value)))
+      return StatusTuple(-1, "Error updating value: %s", std::strerror(errno));
+    return StatusTuple(0);
+}
+
+StatusTuple BPFSockmapTable::remove_value(const int& index) {
+    if (!this->remove(const_cast<int*>(&index)))
+      return StatusTuple(-1, "Error removing value: %s", std::strerror(errno));
+    return StatusTuple(0);
+}
+
+BPFSockhashTable::BPFSockhashTable(const TableDesc& desc)
+    : BPFTableBase<int, int>(desc) {
+    if(desc.type != BPF_MAP_TYPE_SOCKHASH)
+      throw std::invalid_argument("Table '" + desc.name +
+                                  "' is not a sockhash table");
+}
+
+StatusTuple BPFSockhashTable::update_value(const int& key,
+                                         const int& value) {
+    if (!this->update(const_cast<int*>(&key), const_cast<int*>(&value)))
+      return StatusTuple(-1, "Error updating value: %s", std::strerror(errno));
+    return StatusTuple(0);
+}
+
+StatusTuple BPFSockhashTable::remove_value(const int& key) {
+    if (!this->remove(const_cast<int*>(&key)))
       return StatusTuple(-1, "Error removing value: %s", std::strerror(errno));
     return StatusTuple(0);
 }

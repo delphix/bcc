@@ -17,8 +17,16 @@ R"********(
 #ifndef __BPF_HELPERS_H
 #define __BPF_HELPERS_H
 
+/* In Linux 5.4 asm_inline was introduced, but it's not supported by clang.
+ * Redefine it to just asm to enable successful compilation.
+ */
+#ifdef asm_inline
+#undef asm_inline
+#define asm_inline asm
+#endif
+
 /* Before bpf_helpers.h is included, uapi bpf.h has been
- * included, which references linux/types.h. This will bring
+ * included, which references linux/types.h. This may bring
  * in asm_volatile_goto definition if permitted based on
  * compiler setup and kernel configs.
  *
@@ -29,7 +37,14 @@ R"********(
  */
 #ifdef asm_volatile_goto
 #undef asm_volatile_goto
+#endif
 #define asm_volatile_goto(x...) asm volatile("invalid use of asm_volatile_goto")
+
+/* In 4.18 and later, when CONFIG_FUNCTION_TRACER is defined, kernel Makefile adds
+ * -DCC_USING_FENTRY. Let do the same for bpf programs.
+ */
+#if defined(CONFIG_FUNCTION_TRACER)
+#define CC_USING_FENTRY
 #endif
 
 #include <uapi/linux/bpf.h>
@@ -70,6 +85,7 @@ struct _name##_table_t { \
   _leaf_type leaf; \
   _leaf_type * (*lookup) (_key_type *); \
   _leaf_type * (*lookup_or_init) (_key_type *, _leaf_type *); \
+  _leaf_type * (*lookup_or_try_init) (_key_type *, _leaf_type *); \
   int (*update) (_key_type *, _leaf_type *); \
   int (*insert) (_key_type *, _leaf_type *); \
   int (*delete) (_key_type *); \
@@ -86,13 +102,16 @@ BPF_ANNOTATE_KV_PAIR(_name, _key_type, _leaf_type)
 #define BPF_TABLE(_table_type, _key_type, _leaf_type, _name, _max_entries) \
 BPF_F_TABLE(_table_type, _key_type, _leaf_type, _name, _max_entries, 0)
 
+#define BPF_TABLE_PINNED(_table_type, _key_type, _leaf_type, _name, _max_entries, _pinned) \
+BPF_TABLE(_table_type ":" _pinned, _key_type, _leaf_type, _name, _max_entries)
+
 // define a table same as above but allow it to be referenced by other modules
 #define BPF_TABLE_PUBLIC(_table_type, _key_type, _leaf_type, _name, _max_entries) \
 BPF_TABLE(_table_type, _key_type, _leaf_type, _name, _max_entries); \
 __attribute__((section("maps/export"))) \
 struct _name##_table_t __##_name
 
-// define a table that is shared accross the programs in the same namespace
+// define a table that is shared across the programs in the same namespace
 #define BPF_TABLE_SHARED(_table_type, _key_type, _leaf_type, _name, _max_entries) \
 BPF_TABLE(_table_type, _key_type, _leaf_type, _name, _max_entries); \
 __attribute__((section("maps/shared"))) \
@@ -256,6 +275,74 @@ struct _name##_table_t _name = { .max_entries = (_max_entries) }
 
 #define BPF_CPUMAP(_name, _max_entries) \
   BPF_XDP_REDIRECT_MAP("cpumap", u32, _name, _max_entries)
+
+#define BPF_XSKMAP(_name, _max_entries) \
+struct _name##_table_t { \
+  u32 key; \
+  int leaf; \
+  int * (*lookup) (int *); \
+  /* xdp_act = map.redirect_map(index, flag) */ \
+  u64 (*redirect_map) (int, int); \
+  u32 max_entries; \
+}; \
+__attribute__((section("maps/xskmap"))) \
+struct _name##_table_t _name = { .max_entries = (_max_entries) }
+
+#define BPF_ARRAY_OF_MAPS(_name, _inner_map_name, _max_entries) \
+  BPF_TABLE("array_of_maps$" _inner_map_name, int, int, _name, _max_entries)
+
+#define BPF_HASH_OF_MAPS(_name, _inner_map_name, _max_entries) \
+  BPF_TABLE("hash_of_maps$" _inner_map_name, int, int, _name, _max_entries)
+
+#define BPF_SK_STORAGE(_name, _leaf_type) \
+struct _name##_table_t { \
+  int key; \
+  _leaf_type leaf; \
+  void * (*sk_storage_get) (void *, void *, int); \
+  int (*sk_storage_delete) (void *); \
+  u32 flags; \
+}; \
+__attribute__((section("maps/sk_storage"))) \
+struct _name##_table_t _name = { .flags = BPF_F_NO_PREALLOC }; \
+BPF_ANNOTATE_KV_PAIR(_name, int, _leaf_type)
+
+#define BPF_SOCKMAP_COMMON(_name, _max_entries, _kind, _helper_name) \
+struct _name##_table_t { \
+  u32 key; \
+  int leaf; \
+  int (*update) (u32 *, int *); \
+  int (*delete) (int *); \
+  /* ret = map.sock_map_update(ctx, key, flag) */ \
+  int (* _helper_name) (void *, void *, u64); \
+  u32 max_entries; \
+}; \
+__attribute__((section("maps/" _kind))) \
+struct _name##_table_t _name = { .max_entries = (_max_entries) }; \
+BPF_ANNOTATE_KV_PAIR(_name, u32, int)
+
+#define BPF_SOCKMAP(_name, _max_entries) \
+  BPF_SOCKMAP_COMMON(_name, _max_entries, "sockmap", sock_map_update)
+
+#define BPF_SOCKHASH(_name, _max_entries) \
+  BPF_SOCKMAP_COMMON(_name, _max_entries, "sockhash", sock_hash_update)
+
+#define BPF_CGROUP_STORAGE_COMMON(_name, _leaf_type, _kind) \
+struct _name##_table_t { \
+  struct bpf_cgroup_storage_key key; \
+  _leaf_type leaf; \
+  _leaf_type * (*lookup) (struct bpf_cgroup_storage_key *); \
+  int (*update) (struct bpf_cgroup_storage_key *, _leaf_type *); \
+  int (*get_local_storage) (u64); \
+}; \
+__attribute__((section("maps/" _kind))) \
+struct _name##_table_t _name = { 0 }; \
+BPF_ANNOTATE_KV_PAIR(_name, struct bpf_cgroup_storage_key, _leaf_type)
+
+#define BPF_CGROUP_STORAGE(_name, _leaf_type) \
+  BPF_CGROUP_STORAGE_COMMON(_name, _leaf_type, "cgroup_storage")
+
+#define BPF_PERCPU_CGROUP_STORAGE(_name, _leaf_type) \
+  BPF_CGROUP_STORAGE_COMMON(_name, _leaf_type, "percpu_cgroup_storage")
 
 // packet parsing state machine helpers
 #define cursor_advance(_cursor, _len) \
@@ -508,6 +595,25 @@ static void *(*bpf_sk_storage_get)(void *map, struct bpf_sock *sk,
   (void *) BPF_FUNC_sk_storage_get;
 static int (*bpf_sk_storage_delete)(void *map, struct bpf_sock *sk) =
   (void *)BPF_FUNC_sk_storage_delete;
+static int (*bpf_send_signal)(unsigned sig) = (void *)BPF_FUNC_send_signal;
+static long long (*bpf_tcp_gen_syncookie)(struct bpf_sock *sk, void *ip,
+                                          int ip_len, void *tcp, int tcp_len) =
+  (void *) BPF_FUNC_tcp_gen_syncookie;
+static int (*bpf_skb_output)(void *ctx, void *map, __u64 flags, void *data,
+                             __u64 size) =
+  (void *)BPF_FUNC_skb_output;
+static int (*bpf_probe_read_user)(void *dst, __u32 size,
+                                  const void *unsafe_ptr) =
+  (void *)BPF_FUNC_probe_read_user;
+static int (*bpf_probe_read_kernel)(void *dst, __u32 size,
+                                    const void *unsafe_ptr) =
+  (void *)BPF_FUNC_probe_read_kernel;
+static int (*bpf_probe_read_user_str)(void *dst, __u32 size,
+            const void *unsafe_ptr) =
+  (void *)BPF_FUNC_probe_read_user_str;
+static int (*bpf_probe_read_kernel_str)(void *dst, __u32 size,
+            const void *unsafe_ptr) =
+  (void *)BPF_FUNC_probe_read_kernel_str;
 
 /* llvm builtin functions that eBPF C program may use to
  * emit BPF_LD_ABS and BPF_LD_IND instructions

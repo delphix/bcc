@@ -9,8 +9,8 @@
 # It could be useful in scenarios where load balancers needs to be updated
 # dynamically as application is fully initialized.
 #
-# All IPv4 listen attempts are traced, even if they ultimately fail or the
-# the listening program is not willing to accept().
+# All IPv4 and IPv6 listen attempts are traced, even if they ultimately fail
+# or the the listening program is not willing to accept().
 #
 # Copyright (c) 2016 Jean-Tiare Le Bigot.
 # Licensed under the Apache License, Version 2.0 (the "License")
@@ -151,14 +151,14 @@ def event_printer(show_netns):
 
         # Display
         if show_netns:
-            printb(b"%-6d %-12.12s %-12s %-6s %-8s %-5s %-39s" % (
-                pid, event.task, event.netns, protocol, event.backlog,
-                event.lport, address,
+            printb(b"%-6d %-12.12s %-12d %-6s %-8d %-5d %-39s" % (
+                pid, event.task, event.netns, protocol.encode(), event.backlog,
+                event.lport, address.encode(),
             ))
         else:
-            printb(b"%-6d %-12.12s %-6s %-8s %-5s %-39s" % (
-                pid, event.task, protocol, event.backlog,
-                event.lport, address,
+            printb(b"%-6d %-12.12s %-6s %-8d %-5d %-39s" % (
+                pid, event.task, protocol.encode(), event.backlog,
+                event.lport, address.encode(),
             ))
 
     return print_event

@@ -36,7 +36,7 @@ def positive_nonzero_int(val):
     return ival
 
 def stack_id_err(stack_id):
-    # -EFAULT in get_stackid normally means the stack-trace is not availible,
+    # -EFAULT in get_stackid normally means the stack-trace is not available,
     # Such as getting kernel stack trace in userspace code
     return (stack_id < 0) and (stack_id != -errno.EFAULT)
 
@@ -321,7 +321,7 @@ for k, v in sorted(counts.items(), key=lambda counts: counts[1].value):
         line = [k.target.decode('utf-8', 'replace')]
         if not args.kernel_stacks_only:
             if stack_id_err(k.t_u_stack_id):
-                line.append("[Missed User Stack]")
+                line.append("[Missed User Stack] %d" % k.t_u_stack_id)
             else:
                 line.extend([b.sym(addr, k.t_tgid).decode('utf-8', 'replace')
                     for addr in reversed(list(target_user_stack)[1:])])
@@ -350,10 +350,10 @@ for k, v in sorted(counts.items(), key=lambda counts: counts[1].value):
         print("%s %d" % (";".join(line), v.value))
     else:
         # print wakeup name then stack in reverse order
-        print("    %-16s %s %s" % ("waker:", k.waker.decode('utf-8', 'replace'), k.t_pid))
+        print("    %-16s %s %s" % ("waker:", k.waker.decode('utf-8', 'replace'), k.w_pid))
         if not args.kernel_stacks_only:
             if stack_id_err(k.w_u_stack_id):
-                print("    [Missed User Stack]")
+                print("    [Missed User Stack] %d" % k.w_u_stack_id)
             else:
                 for addr in waker_user_stack:
                     print("    %s" % b.sym(addr, k.w_tgid))
@@ -383,7 +383,7 @@ for k, v in sorted(counts.items(), key=lambda counts: counts[1].value):
             else:
                 for addr in target_user_stack:
                     print("    %s" % b.sym(addr, k.t_tgid))
-        print("    %-16s %s %s" % ("target:", k.target.decode('utf-8', 'replace'), k.w_pid))
+        print("    %-16s %s %s" % ("target:", k.target.decode('utf-8', 'replace'), k.t_pid))
         print("        %d\n" % v.value)
 
 if missing_stacks > 0:

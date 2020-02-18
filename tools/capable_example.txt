@@ -32,6 +32,28 @@ TIME      UID    PID    COMM             CAP  NAME                 AUDIT
 22:11:25  0      7049   chmod            4    CAP_FSETID           1
 22:11:25  0      7051   chmod            4    CAP_FSETID           1
 22:11:25  0      7051   chmod            4    CAP_FSETID           1
+
+Checks where AUDIT is 0 are ignored by default, which can be changed
+with -v but is more verbose.
+
+We can show the TID and INSETID columns with -x.
+Since only a recent kernel version >= 5.1 reports the INSETID bit to cap_capable(),
+the fallback value "N/A" will be displayed on older kernels.
+
+# ./capable.py -x
+TIME      UID    PID    TID    COMM             CAP  NAME                 AUDIT  INSETID
+08:22:36  0      12869  12869  chown            0    CAP_CHOWN            1      0
+08:22:36  0      12869  12869  chown            0    CAP_CHOWN            1      0
+08:22:36  0      12869  12869  chown            0    CAP_CHOWN            1      0
+08:23:02  0      13036  13036  setuidgid        6    CAP_SETGID           1      0
+08:23:02  0      13036  13036  setuidgid        6    CAP_SETGID           1      0
+08:23:02  0      13036  13036  setuidgid        7    CAP_SETUID           1      1
+08:23:13  0      13085  13085  chmod            3    CAP_FOWNER           1      0
+08:23:13  0      13085  13085  chmod            4    CAP_FSETID           1      0
+08:23:13  0      13085  13085  chmod            3    CAP_FOWNER           1      0
+08:23:13  0      13085  13085  chmod            4    CAP_FSETID           1      0
+08:23:13  0      13085  13085  chmod            4    CAP_FSETID           1      0
+08:24:27  0      13522  13522  ping             13   CAP_NET_RAW          1      0
 [...]
 
 This can be useful for general debugging, and also security enforcement:

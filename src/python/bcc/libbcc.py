@@ -18,13 +18,14 @@ lib = ct.CDLL("libbcc.so.0", use_errno=True)
 
 # keep in sync with bcc_common.h
 lib.bpf_module_create_b.restype = ct.c_void_p
-lib.bpf_module_create_b.argtypes = [ct.c_char_p, ct.c_char_p, ct.c_uint]
+lib.bpf_module_create_b.argtypes = [ct.c_char_p, ct.c_char_p, ct.c_uint,
+        ct.c_char_p]
 lib.bpf_module_create_c.restype = ct.c_void_p
 lib.bpf_module_create_c.argtypes = [ct.c_char_p, ct.c_uint,
-        ct.POINTER(ct.c_char_p), ct.c_int, ct.c_bool]
+        ct.POINTER(ct.c_char_p), ct.c_int, ct.c_bool, ct.c_char_p]
 lib.bpf_module_create_c_from_string.restype = ct.c_void_p
 lib.bpf_module_create_c_from_string.argtypes = [ct.c_char_p, ct.c_uint,
-        ct.POINTER(ct.c_char_p), ct.c_int, ct.c_bool]
+        ct.POINTER(ct.c_char_p), ct.c_int, ct.c_bool, ct.c_char_p]
 lib.bpf_module_destroy.restype = None
 lib.bpf_module_destroy.argtypes = [ct.c_void_p]
 lib.bpf_module_license.restype = ct.c_char_p
@@ -88,7 +89,7 @@ lib.bpf_attach_socket.restype = ct.c_int
 lib.bpf_attach_socket.argtypes = [ct.c_int, ct.c_int]
 lib.bcc_func_load.restype = ct.c_int
 lib.bcc_func_load.argtypes = [ct.c_void_p, ct.c_int, ct.c_char_p, ct.c_void_p,
-        ct.c_size_t, ct.c_char_p, ct.c_uint, ct.c_int, ct.c_char_p, ct.c_uint]
+        ct.c_size_t, ct.c_char_p, ct.c_uint, ct.c_int, ct.c_char_p, ct.c_uint, ct.c_char_p]
 _RAW_CB_TYPE = ct.CFUNCTYPE(None, ct.py_object, ct.c_void_p, ct.c_int)
 _LOST_CB_TYPE = ct.CFUNCTYPE(None, ct.py_object, ct.c_ulonglong)
 lib.bpf_attach_kprobe.restype = ct.c_int

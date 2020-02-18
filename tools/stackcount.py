@@ -110,14 +110,14 @@ class Probe(object):
         if self.user_stack:
                 stack_trace += """
                     key.user_stack_id = stack_traces.get_stackid(
-                      %s, BPF_F_REUSE_STACKID | BPF_F_USER_STACK
+                      %s, BPF_F_USER_STACK
                     );""" % (ctx_name)
         else:
                 stack_trace += "key.user_stack_id = -1;"
         if self.kernel_stack:
                 stack_trace += """
                     key.kernel_stack_id = stack_traces.get_stackid(
-                      %s, BPF_F_REUSE_STACKID
+                      %s, 0
                     );""" % (ctx_name)
         else:
                 stack_trace += "key.kernel_stack_id = -1;"
@@ -346,10 +346,10 @@ class Tool(object):
                     user_stack = list(user_stack)
                     kernel_stack = list(kernel_stack)
                     line = [k.name.decode('utf-8', 'replace')] + \
-                        [b.sym(addr, k.tgid) for addr in
+                        [b.sym(addr, k.tgid).decode('utf-8', 'replace') for addr in
                         reversed(user_stack)] + \
                         (self.need_delimiter and ["-"] or []) + \
-                        [b.ksym(addr) for addr in reversed(kernel_stack)]
+                        [b.ksym(addr).decode('utf-8', 'replace') for addr in reversed(kernel_stack)]
                     print("%s %d" % (";".join(line), v.value))
                 else:
                     # print multi-line stack output

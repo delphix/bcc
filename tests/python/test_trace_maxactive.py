@@ -14,11 +14,13 @@ class TestKprobeMaxactive(TestCase):
         typedef struct { u64 val; } Val;
         BPF_HASH(stats, Key, Val, 3);
         int hello(void *ctx) {
-          stats.lookup_or_init(&(Key){1}, &(Val){0})->val++;
+          Val *val = stats.lookup_or_init(&(Key){1}, &(Val){0});
+          val->val++;
           return 0;
         }
         int goodbye(void *ctx) {
-          stats.lookup_or_init(&(Key){2}, &(Val){0})->val++;
+          Val *val = stats.lookup_or_init(&(Key){2}, &(Val){0});
+          val->val++;
           return 0;
         }
         """)

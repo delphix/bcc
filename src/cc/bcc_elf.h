@@ -20,6 +20,7 @@
 extern "C" {
 #endif
 
+#include <stddef.h>
 #include <stdint.h>
 
 struct bcc_elf_usdt {
@@ -38,6 +39,9 @@ typedef void (*bcc_elf_probecb)(const char *, const struct bcc_elf_usdt *,
 // Symbol name, start address, length, payload
 // Callback returning a negative value indicates to stop the iteration
 typedef int (*bcc_elf_symcb)(const char *, uint64_t, uint64_t, void *);
+// Section idx, str table idx, str length, start address, length, payload
+typedef int (*bcc_elf_symcb_lazy)(size_t, size_t, size_t, uint64_t, uint64_t,
+             int, void *);
 // Segment virtual address, memory size, file offset, payload
 // Callback returning a negative value indicates to stop the iteration
 typedef int (*bcc_elf_load_sectioncb)(uint64_t, uint64_t, uint64_t, void *);
@@ -52,11 +56,15 @@ int bcc_elf_foreach_load_section(const char *path,
                                  bcc_elf_load_sectioncb callback,
                                  void *payload);
 // Iterate over symbol table of a binary module
-// Parameter "option" points to a bcc_symbol_option struct to indicate wheather
+// Parameter "option" points to a bcc_symbol_option struct to indicate whether
 // and how to use debuginfo file, and what types of symbols to load.
 // Returns -1 on error, and 0 on success or stopped by callback
 int bcc_elf_foreach_sym(const char *path, bcc_elf_symcb callback, void *option,
                         void *payload);
+// Similar to bcc_elf_foreach_sym, but pass reference to symbolized string along
+// with symbolized string length
+int bcc_elf_foreach_sym_lazy(const char *path, bcc_elf_symcb_lazy callback,
+                             void *option, void *payload);
 // Iterate over all symbols from current system's vDSO
 // Returns -1 on error, and 0 on success or stopped by callback
 int bcc_elf_foreach_vdso_sym(bcc_elf_symcb callback, void *payload);
@@ -70,6 +78,9 @@ int bcc_elf_is_exe(const char *path);
 int bcc_elf_is_vdso(const char *name);
 int bcc_free_memory();
 int bcc_elf_get_buildid(const char *path, char *buildid);
+int bcc_elf_symbol_str(const char *path, size_t section_idx,
+                       size_t str_table_idx, char *out, size_t len,
+                       int debugfile);
 
 #ifdef __cplusplus
 }

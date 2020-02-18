@@ -26,6 +26,7 @@ examples = """examples:
     ./capable -p 181      # only trace PID 181
     ./capable -K          # add kernel stacks to trace
     ./capable -U          # add user-space stacks to trace
+    ./capable -x          # extra fields: show TID and INSETID columns
 """
 parser = argparse.ArgumentParser(
     description="Trace security capability checks",
@@ -39,6 +40,8 @@ parser.add_argument("-K", "--kernel-stack", action="store_true",
     help="output kernel stack trace")
 parser.add_argument("-U", "--user-stack", action="store_true",
     help="output user stack trace")
+parser.add_argument("-x", "--extra", action="store_true",
+    help="show extra fields in TID and INSETID columns")
 args = parser.parse_args()
 debug = 0
 
@@ -99,6 +102,7 @@ StackType = Enum(("Kernel", "User",))
 bpf_text = """
 #include <uapi/linux/ptrace.h>
 #include <linux/sched.h>
+#include <linux/security.h>
 
 struct data_t {
    u32 tgid;
@@ -106,6 +110,7 @@ struct data_t {
    u32 uid;
    int cap;
    int audit;
+   int insetid;
    char comm[TASK_COMM_LEN];
 #ifdef KERNEL_STACKS
    int kernel_stack_id;
@@ -122,17 +127,28 @@ BPF_STACK_TRACE(stacks, 2048);
 #endif
 
 int kprobe__cap_capable(struct pt_regs *ctx, const struct cred *cred,
-    struct user_namespace *targ_ns, int cap, int audit)
+    struct user_namespace *targ_ns, int cap, int cap_opt)
 {
     u64 __pid_tgid = bpf_get_current_pid_tgid();
     u32 tgid = __pid_tgid >> 32;
     u32 pid = __pid_tgid;
+    int audit;
+    int insetid;
+
+  #ifdef CAP_OPT_NONE
+    audit = (cap_opt & 0b10) == 0;
+    insetid = (cap_opt & 0b100) != 0;
+  #else
+    audit = cap_opt;
+    insetid = -1;
+  #endif
+
     FILTER1
     FILTER2
     FILTER3
 
     u32 uid = bpf_get_current_uid_gid();
-    struct data_t data = {.tgid = tgid, .pid = pid, .uid = uid, .cap = cap, .audit = audit};
+    struct data_t data = {.tgid = tgid, .pid = pid, .uid = uid, .cap = cap, .audit = audit, .insetid = insetid};
 #ifdef KERNEL_STACKS
     data.kernel_stack_id = stacks.get_stackid(ctx, 0);
 #endif
@@ -165,11 +181,15 @@ if debug:
 b = BPF(text=bpf_text)
 
 # header
-print("%-9s %-6s %-6s %-6s %-16s %-4s %-20s %s" % (
-    "TIME", "UID", "PID", "TID", "COMM", "CAP", "NAME", "AUDIT"))
+if args.extra:
+    print("%-9s %-6s %-6s %-6s %-16s %-4s %-20s %-6s %s" % (
+        "TIME", "UID", "PID", "TID", "COMM", "CAP", "NAME", "AUDIT", "INSETID"))
+else:
+    print("%-9s %-6s %-6s %-16s %-4s %-20s %-6s" % (
+        "TIME", "UID", "PID", "COMM", "CAP", "NAME", "AUDIT"))
 
 def stack_id_err(stack_id):
-    # -EFAULT in get_stackid normally means the stack-trace is not availible,
+    # -EFAULT in get_stackid normally means the stack-trace is not available,
     # Such as getting kernel stack trace in userspace code
     return (stack_id < 0) and (stack_id != -errno.EFAULT)
 
@@ -190,9 +210,14 @@ def print_event(bpf, cpu, data, size):
         name = capabilities[event.cap]
     else:
         name = "?"
-    print("%-9s %-6d %-6d %-6d %-16s %-4d %-20s %d" % (strftime("%H:%M:%S"),
-        event.uid, event.pid, event.tgid, event.comm.decode('utf-8', 'replace'),
-        event.cap, name, event.audit))
+    if args.extra:
+        print("%-9s %-6d %-6d %-6d %-16s %-4d %-20s %-6d %s" % (strftime("%H:%M:%S"),
+            event.uid, event.pid, event.tgid, event.comm.decode('utf-8', 'replace'),
+            event.cap, name, event.audit, str(event.insetid) if event.insetid != -1 else "N/A"))
+    else:
+        print("%-9s %-6d %-6d %-16s %-4d %-20s %-6d" % (strftime("%H:%M:%S"),
+            event.uid, event.pid, event.comm.decode('utf-8', 'replace'),
+            event.cap, name, event.audit))
     if args.kernel_stack:
         print_stack(bpf, event.kernel_stack_id, StackType.Kernel, -1)
     if args.user_stack:
