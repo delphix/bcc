@@ -11,7 +11,7 @@
 # Copyright (C) 2016 Sasha Goldshtein.
 
 from __future__ import print_function
-from bcc import BPF, USDT
+from bcc import BPF, USDT, StrcmpRewrite
 from functools import partial
 from time import sleep, strftime
 import time
@@ -65,6 +65,7 @@ class Probe(object):
                 self.string_size = string_size
                 self.kernel_stack = kernel_stack
                 self.user_stack = user_stack
+                self.probe_user_list = set()
                 Probe.probe_count += 1
                 self._parse_probe()
                 self.probe_num = Probe.probe_count
@@ -137,6 +138,19 @@ class Probe(object):
                 # The remainder of the text is the printf action
                 self._parse_action(text.lstrip())
 
+        def _parse_offset(self, func_and_offset):
+                func, offset_str = func_and_offset.split("+")
+                try:
+                        if "x" in offset_str or "X" in offset_str:
+                                offset = int(offset_str, 16)
+                        else:
+                                offset = int(offset_str)
+                except ValueError:
+                        self._bail("invalid offset format " +
+                                   " '%s', must be decimal or hexadecimal" % offset_str)
+
+                return func, offset
+
         def _parse_spec(self, spec):
                 parts = spec.split(":")
                 # Two special cases: 'func' means 'p::func', 'lib:func' means
@@ -154,14 +168,19 @@ class Probe(object):
                 else:
                         self._bail("probe type must be '', 'p', 't', 'r', " +
                                    "or 'u', but got '%s'" % parts[0])
+                self.offset = 0
+                if "+" in parts[-1]:
+                        parts[-1], self.offset = self._parse_offset(parts[-1])
+
                 if self.probe_type == "t":
                         self.tp_category = parts[1]
                         self.tp_event = parts[2]
                         self.library = ""       # kernel
                         self.function = ""      # from TRACEPOINT_PROBE
                 elif self.probe_type == "u":
-                        self.library = ':'.join(parts[1:-1])
-                        self.usdt_name = parts[-1]
+                        # u:<library>[:<provider>]:<probe> where :<provider> is optional
+                        self.library = parts[1]
+                        self.usdt_name = ":".join(parts[2:])
                         self.function = ""      # no function, just address
                         # We will discover the USDT provider by matching on
                         # the USDT name in the specified library
@@ -180,8 +199,17 @@ class Probe(object):
                 target = Probe.pid if Probe.pid and Probe.pid != -1 \
                                    else Probe.tgid
                 self.usdt = USDT(path=self.library, pid=target)
+
+                parts = self.usdt_name.split(":")
+                if len(parts) == 1:
+                        provider_name = None
+                        usdt_name = parts[0].encode("ascii")
+                else:
+                        provider_name = parts[0].encode("ascii")
+                        usdt_name = parts[1].encode("ascii")
                 for probe in self.usdt.enumerate_probes():
-                        if probe.name == self.usdt_name.encode('ascii'):
+                        if ((not provider_name or probe.provider == provider_name)
+                                        and probe.name == usdt_name):
                                 return  # Found it, will enable later
                 self._bail("unrecognized USDT probe %s" % self.usdt_name)
 
@@ -227,17 +255,17 @@ class Probe(object):
 
         aliases_indarg = {
                 "arg1": "({u64 _val; struct pt_regs *_ctx = (struct pt_regs *)PT_REGS_PARM1(ctx);"
-                        "  bpf_probe_read(&_val, sizeof(_val), &(PT_REGS_PARM1(_ctx))); _val;})",
+                        "  bpf_probe_read_kernel(&_val, sizeof(_val), &(PT_REGS_PARM1(_ctx))); _val;})",
                 "arg2": "({u64 _val; struct pt_regs *_ctx = (struct pt_regs *)PT_REGS_PARM1(ctx);"
-                        "  bpf_probe_read(&_val, sizeof(_val), &(PT_REGS_PARM2(_ctx))); _val;})",
+                        "  bpf_probe_read_kernel(&_val, sizeof(_val), &(PT_REGS_PARM2(_ctx))); _val;})",
                 "arg3": "({u64 _val; struct pt_regs *_ctx = (struct pt_regs *)PT_REGS_PARM1(ctx);"
-                        "  bpf_probe_read(&_val, sizeof(_val), &(PT_REGS_PARM3(_ctx))); _val;})",
+                        "  bpf_probe_read_kernel(&_val, sizeof(_val), &(PT_REGS_PARM3(_ctx))); _val;})",
                 "arg4": "({u64 _val; struct pt_regs *_ctx = (struct pt_regs *)PT_REGS_PARM1(ctx);"
-                        "  bpf_probe_read(&_val, sizeof(_val), &(PT_REGS_PARM4(_ctx))); _val;})",
+                        "  bpf_probe_read_kernel(&_val, sizeof(_val), &(PT_REGS_PARM4(_ctx))); _val;})",
                 "arg5": "({u64 _val; struct pt_regs *_ctx = (struct pt_regs *)PT_REGS_PARM1(ctx);"
-                        "  bpf_probe_read(&_val, sizeof(_val), &(PT_REGS_PARM5(_ctx))); _val;})",
+                        "  bpf_probe_read_kernel(&_val, sizeof(_val), &(PT_REGS_PARM5(_ctx))); _val;})",
                 "arg6": "({u64 _val; struct pt_regs *_ctx = (struct pt_regs *)PT_REGS_PARM1(ctx);"
-                        "  bpf_probe_read(&_val, sizeof(_val), &(PT_REGS_PARM6(_ctx))); _val;})",
+                        "  bpf_probe_read_kernel(&_val, sizeof(_val), &(PT_REGS_PARM6(_ctx))); _val;})",
         }
 
         aliases_common = {
@@ -250,47 +278,33 @@ class Probe(object):
                 "$task" : "((struct task_struct *)bpf_get_current_task())"
         }
 
-        def _generate_streq_function(self, string):
-                fname = "streq_%d" % Probe.streq_index
-                Probe.streq_index += 1
-                self.streq_functions += """
-static inline bool %s(char const *ignored, uintptr_t str) {
-        char needle[] = %s;
-        char haystack[sizeof(needle)];
-        bpf_probe_read(&haystack, sizeof(haystack), (void *)str);
-        for (int i = 0; i < sizeof(needle) - 1; ++i) {
-                if (needle[i] != haystack[i]) {
-                        return false;
-                }
-        }
-        return true;
-}
-                """ % (fname, string)
-                return fname
-
         def _rewrite_expr(self, expr):
-                if self.is_syscall_kprobe:
-                    for alias, replacement in Probe.aliases_indarg.items():
-                        expr = expr.replace(alias, replacement)
-                else:
-                    for alias, replacement in Probe.aliases_arg.items():
-                        # For USDT probes, we replace argN values with the
-                        # actual arguments for that probe obtained using
-                        # bpf_readarg_N macros emitted at BPF construction.
-                        if self.probe_type == "u":
-                                continue
+                # Find the occurances of any arg[1-6]@user. Use it later to
+                # identify bpf_probe_read_user
+                for matches in re.finditer(r'(arg[1-6])(@user)', expr):
+                    if matches.group(1).strip() not in self.probe_user_list:
+                        self.probe_user_list.add(matches.group(1).strip())
+                # Remove @user occurrences from arg before resolving to its
+                # corresponding aliases.
+                expr = re.sub(r'(arg[1-6])@user', r'\1', expr)
+                rdict = StrcmpRewrite.rewrite_expr(expr,
+                            self.bin_cmp, self.library,
+                            self.probe_user_list, self.streq_functions,
+                            Probe.streq_index)
+                expr = rdict["expr"]
+                self.streq_functions = rdict["streq_functions"]
+                Probe.streq_index = rdict["probeid"]
+                alias_to_check = Probe.aliases_indarg \
+                                    if self.is_syscall_kprobe \
+                                    else Probe.aliases_arg
+                # For USDT probes, we replace argN values with the
+                # actual arguments for that probe obtained using
+                # bpf_readarg_N macros emitted at BPF construction.
+                if not self.probe_type == "u":
+                    for alias, replacement in alias_to_check.items():
                         expr = expr.replace(alias, replacement)
                 for alias, replacement in Probe.aliases_common.items():
                     expr = expr.replace(alias, replacement)
-                if self.bin_cmp:
-                    STRCMP_RE = 'STRCMP\\(\"([^"]+)\\"'
-                else:
-                    STRCMP_RE = 'STRCMP\\(("[^"]+\\")'
-                matches = re.finditer(STRCMP_RE, expr)
-                for match in matches:
-                        string = match.group(1)
-                        fname = self._generate_streq_function(string)
-                        expr = expr.replace("STRCMP", fname, 1)
                 return expr
 
         p_type = {"u": ct.c_uint, "d": ct.c_int, "lu": ct.c_ulong,
@@ -402,14 +416,24 @@ BPF_PERF_OUTPUT(%s);
                         text = ("        %s %s = 0;\n" +
                                 "        bpf_usdt_readarg(%s, ctx, &%s);\n") \
                                 % (arg_ctype, expr, expr[3], expr)
-
+                probe_read_func = "bpf_probe_read_kernel"
                 if field_type == "s":
+                        if self.library:
+                            probe_read_func = "bpf_probe_read_user"
+                        else:
+                            alias_to_check = Probe.aliases_indarg \
+                                                if self.is_syscall_kprobe \
+                                                else Probe.aliases_arg
+                            for arg, alias in alias_to_check.items():
+                                if alias == expr and arg in self.probe_user_list:
+                                    probe_read_func = "bpf_probe_read_user"
+                                    break
                         return text + """
         if (%s != 0) {
                 void *__tmp = (void *)%s;
-                bpf_probe_read(&__data.v%d, sizeof(__data.v%d), __tmp);
+                %s(&__data.v%d, sizeof(__data.v%d), __tmp);
         }
-                """ % (expr, expr, idx, idx)
+                """ % (expr, expr, probe_read_func, idx, idx)
                 if field_type in Probe.fmt_types:
                         return text + "        __data.v%d = (%s)%s;\n" % \
                                         (idx, Probe.c_type[field_type], expr)
@@ -622,7 +646,8 @@ BPF_PERF_OUTPUT(%s);
                                              fn_name=self.probe_name)
                 elif self.probe_type == "p":
                         bpf.attach_kprobe(event=self.function,
-                                          fn_name=self.probe_name)
+                                          fn_name=self.probe_name,
+                                          event_off=self.offset)
                 # Note that tracepoints don't need an explicit attach
 
         def _attach_u(self, bpf):
@@ -644,7 +669,8 @@ BPF_PERF_OUTPUT(%s);
                         bpf.attach_uprobe(name=libpath,
                                           sym=self.function,
                                           fn_name=self.probe_name,
-                                          pid=Probe.tgid)
+                                          pid=Probe.tgid,
+                                          sym_off=self.offset)
 
 class Tool(object):
         DEFAULT_PERF_BUFFER_PAGES = 64
@@ -653,6 +679,8 @@ EXAMPLES:
 
 trace do_sys_open
         Trace the open syscall and print a default trace message when entered
+trace kfree_skb+0x12
+        Trace the kfree_skb kernel function after the instruction on the 0x12 offset
 trace 'do_sys_open "%s", arg2'
         Trace the open syscall and print the filename being opened
 trace 'do_sys_open "%s", arg2' -n main
@@ -677,6 +705,8 @@ trace 't:block:block_rq_complete "sectors=%d", args->nr_sector'
         Trace the block_rq_complete kernel tracepoint and print # of tx sectors
 trace 'u:pthread:pthread_create (arg4 != 0)'
         Trace the USDT probe pthread_create when its 4th argument is non-zero
+trace 'u:pthread:libpthread:pthread_create (arg4 != 0)'
+        Ditto, but the provider name "libpthread" is specified.
 trace 'p::SyS_nanosleep(struct timespec *ts) "sleep for %lld ns", ts->tv_nsec'
         Trace the nanosleep syscall and print the sleep duration in ns
 trace -c /sys/fs/cgroup/system.slice/workload.service '__x64_sys_nanosleep' '__x64_sys_clone'

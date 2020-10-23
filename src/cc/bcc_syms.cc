@@ -707,12 +707,13 @@ int bcc_resolve_symname(const char *module, const char *symname,
                         const uint64_t addr, int pid,
                         struct bcc_symbol_option *option,
                         struct bcc_symbol *sym) {
+  int module_type;
   static struct bcc_symbol_option default_option = {
     .use_debug_file = 1,
     .check_debug_file_crc = 1,
     .lazy_symbolize = 1,
-#if defined(__powerpc64__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-    .use_symbol_type = BCC_SYM_ALL_TYPES | (1 << STT_PPC64LE_SYM_LEP),
+#if defined(__powerpc64__) && defined(_CALL_ELF) && _CALL_ELF == 2
+    .use_symbol_type = BCC_SYM_ALL_TYPES | (1 << STT_PPC64_ELFV2_SYM_LEP),
 #else
     .use_symbol_type = BCC_SYM_ALL_TYPES,
 #endif
@@ -730,7 +731,7 @@ int bcc_resolve_symname(const char *module, const char *symname,
   }
   if (sym->module == NULL)
     return -1;
-  if (pid != 0 && pid != -1) {
+  if (pid != 0 && pid != -1 && strstr(sym->module, "/proc") != sym->module){
     char *temp = (char*)sym->module;
     sym->module = strdup(tfm::format("/proc/%d/root%s", pid, sym->module).c_str());
     free(temp);
@@ -747,11 +748,10 @@ int bcc_resolve_symname(const char *module, const char *symname,
   if (sym->offset == 0x0)
     goto invalid_module;
 
-  // For executable (ET_EXEC) binaries, translate the virtual address
-  // to physical address in the binary file.
-  // For shared object binaries (ET_DYN), the address from symbol table should
-  // already be physical address in the binary file.
-  if (bcc_elf_get_type(sym->module) == ET_EXEC) {
+  // For executable (ET_EXEC) binaries and shared objects (ET_DYN), translate
+  // the virtual address to physical address in the binary file.
+  module_type = bcc_elf_get_type(sym->module);
+  if (module_type == ET_EXEC || module_type == ET_DYN) {
     struct load_addr_t addr = {
       .target_addr = sym->offset,
       .binary_addr = 0x0,

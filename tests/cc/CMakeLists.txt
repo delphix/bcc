@@ -11,8 +11,8 @@ target_link_libraries(test_static bcc-static)
 
 add_test(NAME c_test_static COMMAND ${TEST_WRAPPER} c_test_static sudo ${CMAKE_CURRENT_BINARY_DIR}/test_static)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-unused-result")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result -fPIC")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-unused-result -fPIC")
 
 if(ENABLE_USDT)
 set(TEST_LIBBCC_SOURCES
@@ -26,12 +26,14 @@ set(TEST_LIBBCC_SOURCES
 	test_perf_event.cc
 	test_pinned_table.cc
 	test_prog_table.cc
+	test_queuestack_table.cc
 	test_shared_table.cc
 	test_sk_storage.cc
 	test_sock_table.cc
 	test_usdt_args.cc
 	test_usdt_probes.cc
-	utils.cc)
+	utils.cc
+	test_parse_tracepoint.cc)
 
 add_executable(test_libbcc ${TEST_LIBBCC_SOURCES})
 
@@ -49,7 +51,7 @@ if(LIBBPF_FOUND)
   add_executable(test_libbcc_no_libbpf ${TEST_LIBBCC_SOURCES})
   add_dependencies(test_libbcc_no_libbpf bcc-shared-no-libbpf)
 
-  target_link_libraries(test_libbcc_no_libbpf ${PROJECT_BINARY_DIR}/src/cc/libbcc-no-libbpf.so dl usdt_test_lib bpf)
+  target_link_libraries(test_libbcc_no_libbpf ${PROJECT_BINARY_DIR}/src/cc/libbcc-no-libbpf.so dl usdt_test_lib ${LIBBPF_LIBRARIES})
   set_target_properties(test_libbcc_no_libbpf PROPERTIES INSTALL_RPATH ${PROJECT_BINARY_DIR}/src/cc)
   target_compile_definitions(test_libbcc_no_libbpf PRIVATE -DLIBBCC_NAME=\"libbcc-no-libbpf.so\")
 

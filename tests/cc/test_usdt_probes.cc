@@ -62,6 +62,16 @@ TEST_CASE("test finding a probe in our own process", "[usdt]") {
   }
 }
 
+TEST_CASE("test probe's attributes with C++ API", "[usdt]") {
+    const ebpf::USDT u("/proc/self/exe", "libbcc_test", "sample_probe_1", "on_event");
+
+    REQUIRE(u.binary_path() == "/proc/self/exe");
+    REQUIRE(u.pid() == -1);
+    REQUIRE(u.provider() == "libbcc_test");
+    REQUIRE(u.name() == "sample_probe_1");
+    REQUIRE(u.probe_func() == "on_event");
+}
+
 TEST_CASE("test fine a probe in our own binary with C++ API", "[usdt]") {
     ebpf::BPF bpf;
     ebpf::USDT u("/proc/self/exe", "libbcc_test", "sample_probe_1", "on_event");
@@ -74,6 +84,20 @@ TEST_CASE("test fine a probe in our own binary with C++ API", "[usdt]") {
 
     res = bpf.detach_usdt(u);
     REQUIRE(res.code() == 0);
+}
+
+TEST_CASE("test fine probes in our own binary with C++ API", "[usdt]") {
+    ebpf::BPF bpf;
+    ebpf::USDT u("/proc/self/exe", "libbcc_test", "sample_probe_1", "on_event");
+
+    auto res = bpf.init("int on_event() { return 0; }", {}, {u});
+    REQUIRE(res.ok());
+
+    res = bpf.attach_usdt_all();
+    REQUIRE(res.ok());
+
+    res = bpf.detach_usdt_all();
+    REQUIRE(res.ok());
 }
 
 TEST_CASE("test fine a probe in our Process with C++ API", "[usdt]") {
@@ -362,5 +386,11 @@ TEST_CASE("test probing running Ruby process in namespaces",
 
     res = bpf.detach_usdt(u, ruby_pid);
     REQUIRE(res.code() == 0);
+
+    struct bcc_symbol sym;
+    std::string pid_root= "/proc/" + std::to_string(ruby_pid) + "/root/";
+    std::string module = pid_root + "usr/local/bin/ruby";
+    REQUIRE(bcc_resolve_symname(module.c_str(), "rb_gc_mark", 0x0, ruby_pid, nullptr, &sym) == 0);
+    REQUIRE(std::string(sym.module).find(pid_root, 1) == std::string::npos);
   }
 }

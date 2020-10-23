@@ -21,6 +21,7 @@
 
 from __future__ import print_function
 from bcc import BPF
+from bcc.containers import filter_by_containers
 from bcc.utils import printb
 import argparse
 from socket import inet_ntop, ntohs, AF_INET, AF_INET6
@@ -37,6 +38,8 @@ examples = """examples:
     ./tcpconnect -U        # include UID
     ./tcpconnect -u 1000   # only trace UID 1000
     ./tcpconnect -c        # count connects per src ip and dest ip/port
+    ./tcpconnect --cgroupmap mappath  # only trace cgroups in this BPF map
+    ./tcpconnect --mntnsmap mappath   # only trace mount namespaces in the map
 """
 parser = argparse.ArgumentParser(
     description="Trace TCP connects",
@@ -54,6 +57,10 @@ parser.add_argument("-u", "--uid",
     help="trace this UID only")
 parser.add_argument("-c", "--count", action="store_true",
     help="count connects per src ip and dest ip/port")
+parser.add_argument("--cgroupmap",
+    help="trace cgroups in this BPF map only")
+parser.add_argument("--mntnsmap",
+    help="trace mount namespaces in this BPF map only")
 parser.add_argument("--ebpf", action="store_true",
     help=argparse.SUPPRESS)
 args = parser.parse_args()
@@ -109,6 +116,10 @@ BPF_HASH(ipv6_count, struct ipv6_flow_key_t);
 
 int trace_connect_entry(struct pt_regs *ctx, struct sock *sk)
 {
+    if (container_should_be_filtered()) {
+        return 0;
+    }
+
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u32 pid = pid_tgid >> 32;
     u32 tid = pid_tgid;
@@ -194,9 +205,9 @@ struct_init = { 'ipv4':
         { 'count' :
                """
                struct ipv6_flow_key_t flow_key = {};
-               bpf_probe_read(&flow_key.saddr, sizeof(flow_key.saddr),
+               bpf_probe_read_kernel(&flow_key.saddr, sizeof(flow_key.saddr),
                    skp->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
-               bpf_probe_read(&flow_key.daddr, sizeof(flow_key.daddr),
+               bpf_probe_read_kernel(&flow_key.daddr, sizeof(flow_key.daddr),
                    skp->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
                flow_key.dport = ntohs(dport);
                ipv6_count.increment(flow_key);""",
@@ -205,9 +216,9 @@ struct_init = { 'ipv4':
                struct ipv6_data_t data6 = {.pid = pid, .ip = ipver};
                data6.uid = bpf_get_current_uid_gid();
                data6.ts_us = bpf_ktime_get_ns() / 1000;
-               bpf_probe_read(&data6.saddr, sizeof(data6.saddr),
+               bpf_probe_read_kernel(&data6.saddr, sizeof(data6.saddr),
                    skp->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
-               bpf_probe_read(&data6.daddr, sizeof(data6.daddr),
+               bpf_probe_read_kernel(&data6.daddr, sizeof(data6.daddr),
                    skp->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
                data6.dport = ntohs(dport);
                bpf_get_current_comm(&data6.task, sizeof(data6.task));
@@ -230,10 +241,11 @@ if args.port:
     dports = [int(dport) for dport in args.port.split(',')]
     dports_if = ' && '.join(['dport != %d' % ntohs(dport) for dport in dports])
     bpf_text = bpf_text.replace('FILTER_PORT',
-        'if (%s) { currsock.delete(&pid); return 0; }' % dports_if)
+        'if (%s) { currsock.delete(&tid); return 0; }' % dports_if)
 if args.uid:
     bpf_text = bpf_text.replace('FILTER_UID',
         'if (uid != %s) { return 0; }' % args.uid)
+bpf_text = filter_by_containers(args) + bpf_text
 
 bpf_text = bpf_text.replace('FILTER_PID', '')
 bpf_text = bpf_text.replace('FILTER_PORT', '')

@@ -77,10 +77,10 @@ int kprobe__tty_write(struct pt_regs *ctx, struct file *file,
     if (file->f_inode->i_ino != PTS)
         return 0;
 
-    // bpf_probe_read() can only use a fixed size, so truncate to count
+    // bpf_probe_read_user() can only use a fixed size, so truncate to count
     // in user space:
     struct data_t data = {};
-    bpf_probe_read(&data.buf, BUFSIZE, (void *)buf);
+    bpf_probe_read_user(&data.buf, BUFSIZE, (void *)buf);
     if (count > BUFSIZE)
         data.count = BUFSIZE;
     else

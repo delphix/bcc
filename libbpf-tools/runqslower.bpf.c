@@ -4,10 +4,7 @@
 #include <bpf/bpf_helpers.h>
 #include "runqslower.h"
 
-#define TASK_RUNNING 0
-
-#define BPF_F_INDEX_MASK		0xffffffffULL
-#define BPF_F_CURRENT_CPU		BPF_F_INDEX_MASK
+#define TASK_RUNNING	0
 
 const volatile __u64 min_us = 0;
 const volatile pid_t targ_pid = 0;
@@ -92,7 +89,7 @@ int handle__sched_switch(u64 *ctx)
 
 	event.pid = pid;
 	event.delta_us = delta_us;
-	bpf_probe_read_str(&event.task, sizeof(event.task), next->comm);
+	bpf_probe_read_kernel_str(&event.task, sizeof(event.task), next->comm);
 
 	/* output */
 	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,

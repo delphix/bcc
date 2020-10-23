@@ -26,6 +26,7 @@
 
 from __future__ import print_function
 from bcc import BPF
+from bcc.containers import filter_by_containers
 import argparse
 from socket import inet_ntop, AF_INET, AF_INET6
 from struct import pack
@@ -45,6 +46,8 @@ examples = """examples:
     ./tcptop           # trace TCP send/recv by host
     ./tcptop -C        # don't clear the screen
     ./tcptop -p 181    # only trace PID 181
+    ./tcptop --cgroupmap mappath  # only trace cgroups in this BPF map
+    ./tcptop --mntnsmap mappath   # only trace mount namespaces in the map
 """
 parser = argparse.ArgumentParser(
     description="Summarize TCP send/recv throughput by host",
@@ -60,6 +63,10 @@ parser.add_argument("interval", nargs="?", default=1, type=range_check,
     help="output interval, in seconds (default 1)")
 parser.add_argument("count", nargs="?", default=-1, type=range_check,
     help="number of outputs")
+parser.add_argument("--cgroupmap",
+    help="trace cgroups in this BPF map only")
+parser.add_argument("--mntnsmap",
+    help="trace mount namespaces in this BPF map only")
 parser.add_argument("--ebpf", action="store_true",
     help=argparse.SUPPRESS)
 args = parser.parse_args()
@@ -85,11 +92,12 @@ BPF_HASH(ipv4_send_bytes, struct ipv4_key_t);
 BPF_HASH(ipv4_recv_bytes, struct ipv4_key_t);
 
 struct ipv6_key_t {
-    u32 pid;
     unsigned __int128 saddr;
     unsigned __int128 daddr;
+    u32 pid;
     u16 lport;
     u16 dport;
+    u64 __pad__;
 };
 BPF_HASH(ipv6_send_bytes, struct ipv6_key_t);
 BPF_HASH(ipv6_recv_bytes, struct ipv6_key_t);
@@ -97,8 +105,13 @@ BPF_HASH(ipv6_recv_bytes, struct ipv6_key_t);
 int kprobe__tcp_sendmsg(struct pt_regs *ctx, struct sock *sk,
     struct msghdr *msg, size_t size)
 {
+    if (container_should_be_filtered()) {
+        return 0;
+    }
+
     u32 pid = bpf_get_current_pid_tgid() >> 32;
-    FILTER
+    FILTER_PID
+
     u16 dport = 0, family = sk->__sk_common.skc_family;
 
     if (family == AF_INET) {
@@ -112,9 +125,9 @@ int kprobe__tcp_sendmsg(struct pt_regs *ctx, struct sock *sk,
 
     } else if (family == AF_INET6) {
         struct ipv6_key_t ipv6_key = {.pid = pid};
-        bpf_probe_read(&ipv6_key.saddr, sizeof(ipv6_key.saddr),
+        bpf_probe_read_kernel(&ipv6_key.saddr, sizeof(ipv6_key.saddr),
             &sk->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
-        bpf_probe_read(&ipv6_key.daddr, sizeof(ipv6_key.daddr),
+        bpf_probe_read_kernel(&ipv6_key.daddr, sizeof(ipv6_key.daddr),
             &sk->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
         ipv6_key.lport = sk->__sk_common.skc_num;
         dport = sk->__sk_common.skc_dport;
@@ -134,8 +147,13 @@ int kprobe__tcp_sendmsg(struct pt_regs *ctx, struct sock *sk,
  */
 int kprobe__tcp_cleanup_rbuf(struct pt_regs *ctx, struct sock *sk, int copied)
 {
+    if (container_should_be_filtered()) {
+        return 0;
+    }
+
     u32 pid = bpf_get_current_pid_tgid() >> 32;
-    FILTER
+    FILTER_PID
+
     u16 dport = 0, family = sk->__sk_common.skc_family;
     u64 *val, zero = 0;
 
@@ -153,9 +171,9 @@ int kprobe__tcp_cleanup_rbuf(struct pt_regs *ctx, struct sock *sk, int copied)
 
     } else if (family == AF_INET6) {
         struct ipv6_key_t ipv6_key = {.pid = pid};
-        bpf_probe_read(&ipv6_key.saddr, sizeof(ipv6_key.saddr),
+        bpf_probe_read_kernel(&ipv6_key.saddr, sizeof(ipv6_key.saddr),
             &sk->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
-        bpf_probe_read(&ipv6_key.daddr, sizeof(ipv6_key.daddr),
+        bpf_probe_read_kernel(&ipv6_key.daddr, sizeof(ipv6_key.daddr),
             &sk->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
         ipv6_key.lport = sk->__sk_common.skc_num;
         dport = sk->__sk_common.skc_dport;
@@ -170,10 +188,11 @@ int kprobe__tcp_cleanup_rbuf(struct pt_regs *ctx, struct sock *sk, int copied)
 
 # code substitutions
 if args.pid:
-    bpf_text = bpf_text.replace('FILTER',
+    bpf_text = bpf_text.replace('FILTER_PID',
         'if (pid != %s) { return 0; }' % args.pid)
 else:
-    bpf_text = bpf_text.replace('FILTER', '')
+    bpf_text = bpf_text.replace('FILTER_PID', '')
+bpf_text = filter_by_containers(args) + bpf_text
 if debug or args.ebpf:
     print(bpf_text)
     if args.ebpf:

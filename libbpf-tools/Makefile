@@ -6,9 +6,41 @@ BPFTOOL ?= bin/bpftool
 LIBBPF_SRC := $(abspath ../src/cc/libbpf/src)
 LIBBPF_OBJ := $(abspath $(OUTPUT)/libbpf.a)
 INCLUDES := -I$(OUTPUT)
-CFLAGS := -g -Wall
+CFLAGS := -g -O2 -Wall
+ARCH := $(shell uname -m | sed 's/x86_64/x86/')
 
-APPS = runqslower
+APPS = \
+	biolatency \
+	biopattern \
+	biosnoop \
+	biostacks \
+	bitesize \
+	cpudist \
+	drsnoop \
+	execsnoop \
+	filelife \
+	hardirqs \
+	llcstat \
+	numamove \
+	opensnoop \
+	readahead \
+	runqlat \
+	runqlen \
+	runqslower \
+	softirqs \
+	syscount \
+	tcpconnect \
+	tcpconnlat \
+	vfsstat \
+	xfsslower \
+	#
+
+COMMON_OBJ = \
+	$(OUTPUT)/trace_helpers.o \
+	$(OUTPUT)/syscall_helpers.o \
+	$(OUTPUT)/errno_helpers.o \
+	$(OUTPUT)/map_helpers.o \
+	#
 
 .PHONY: all
 all: $(APPS)
@@ -31,11 +63,13 @@ $(OUTPUT) $(OUTPUT)/libbpf:
 	$(call msg,MKDIR,$@)
 	$(Q)mkdir -p $@
 
-$(APPS): %: $(OUTPUT)/%.o $(LIBBPF_OBJ) | $(OUTPUT)
+$(APPS): %: $(OUTPUT)/%.o $(LIBBPF_OBJ) $(COMMON_OBJ) | $(OUTPUT)
 	$(call msg,BINARY,$@)
 	$(Q)$(CC) $(CFLAGS) $^ -lelf -lz -o $@
 
-$(OUTPUT)/%.o: %.c $(OUTPUT)/%.skel.h $(wildcard %.h) | $(OUTPUT)
+$(patsubst %,$(OUTPUT)/%.o,$(APPS)): %.o: %.skel.h
+
+$(OUTPUT)/%.o: %.c $(wildcard %.h) | $(OUTPUT)
 	$(call msg,CC,$@)
 	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $(filter %.c,$^) -o $@
 
@@ -45,8 +79,8 @@ $(OUTPUT)/%.skel.h: $(OUTPUT)/%.bpf.o | $(OUTPUT)
 
 $(OUTPUT)/%.bpf.o: %.bpf.c $(LIBBPF_OBJ) $(wildcard %.h) vmlinux.h | $(OUTPUT)
 	$(call msg,BPF,$@)
-	$(Q)$(CLANG) -g -O2 -target bpf $(INCLUDES)			      \
-		 -c $(filter %.c,$^) -o $@ &&				      \
+	$(Q)$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH)		      \
+		     $(INCLUDES) -c $(filter %.c,$^) -o $@ &&		      \
 	$(LLVM_STRIP) -g $@
 
 # Build libbpf.a

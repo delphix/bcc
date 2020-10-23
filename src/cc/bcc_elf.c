@@ -257,16 +257,8 @@ static int list_in_scn(Elf *e, Elf_Scn *section, size_t stridx, size_t symsize,
         continue;
 
 #ifdef __powerpc64__
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-      if (opddata && sym.st_shndx == opdidx) {
-        size_t offset = sym.st_value - opdshdr.sh_addr;
-        /* Find the function descriptor */
-        uint64_t *descr = opddata->d_buf + offset;
-        /* Read the actual entry point address from the descriptor */
-        sym.st_value = *descr;
-      }
-#elif __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-      if (option->use_symbol_type & (1 << STT_PPC64LE_SYM_LEP)) {
+#if defined(_CALL_ELF) && _CALL_ELF == 2
+      if (option->use_symbol_type & (1 << STT_PPC64_ELFV2_SYM_LEP)) {
         /*
          * The PowerPC 64-bit ELF v2 ABI says that the 3 most significant bits
          * in the st_other field of the symbol table specifies the number of
@@ -286,6 +278,14 @@ static int list_in_scn(Elf *e, Elf_Scn *section, size_t stridx, size_t symsize,
           /* If 6, LEP is 16 instructions past the GEP */
           case 6: sym.st_value += 64; break;
         }
+      }
+#else
+      if (opddata && sym.st_shndx == opdidx) {
+        size_t offset = sym.st_value - opdshdr.sh_addr;
+        /* Find the function descriptor */
+        uint64_t *descr = opddata->d_buf + offset;
+        /* Read the actual entry point address from the descriptor */
+        sym.st_value = *descr;
       }
 #endif
 #endif
@@ -562,6 +562,10 @@ static char *find_debug_via_symfs(Elf *e, const char* path) {
 
   check_build_id = find_buildid(e, buildid);
 
+  int ns_prefix_length = 0;
+  sscanf(path, "/proc/%*u/root/%n", &ns_prefix_length);
+  path += ns_prefix_length;
+
   snprintf(fullpath, sizeof(fullpath), "%s/%s", symfs, path);
   if (access(fullpath, F_OK) == -1)
     goto out;
@@ -594,6 +598,25 @@ out:
   return result;
 }
 
+static char *find_debug_file(Elf* e, const char* path, int check_crc) {
+  char *debug_file = NULL;
+
+  // If there is a separate debuginfo file, try to locate and read it, first
+  // using symfs, then using the build-id section, finally using the debuglink
+  // section. These rules are what perf and gdb follow.
+  // See:
+  // - https://github.com/torvalds/linux/blob/v5.2/tools/perf/Documentation/perf-report.txt#L325
+  // - https://sourceware.org/gdb/onlinedocs/gdb/Separate-Debug-Files.html
+  debug_file = find_debug_via_symfs(e, path);
+  if (!debug_file)
+    debug_file = find_debug_via_buildid(e);
+  if (!debug_file)
+    debug_file = find_debug_via_debuglink(e, path, check_crc);
+
+  return debug_file;
+}
+
+
 static int foreach_sym_core(const char *path, bcc_elf_symcb callback,
                             bcc_elf_symcb_lazy callback_lazy,
                             struct bcc_symbol_option *option, void *payload,
@@ -608,21 +631,11 @@ static int foreach_sym_core(const char *path, bcc_elf_symcb callback,
   if (openelf(path, &e, &fd) < 0)
     return -1;
 
-  // If there is a separate debuginfo file, try to locate and read it, first
-  // using symfs, then using the build-id section, finally using the debuglink
-  // section. These rules are what perf and gdb follow.
-  // See:
-  // - https://github.com/torvalds/linux/blob/v5.2/tools/perf/Documentation/perf-report.txt#L325
-  // - https://sourceware.org/gdb/onlinedocs/gdb/Separate-Debug-Files.html
   if (option->use_debug_file && !is_debug_file) {
     // The is_debug_file argument helps avoid infinitely resolving debuginfo
     // files for debuginfo files and so on.
-    debug_file = find_debug_via_symfs(e, path);
-    if (!debug_file)
-      debug_file = find_debug_via_buildid(e);
-    if (!debug_file)
-      debug_file = find_debug_via_debuglink(e, path,
-                                            option->check_debug_file_crc);
+    debug_file = find_debug_file(e, path,
+                                 option->check_debug_file_crc);
     if (debug_file) {
       foreach_sym_core(debug_file, callback, callback_lazy, option, payload, 1);
       free(debug_file);
@@ -998,10 +1011,7 @@ int bcc_elf_symbol_str(const char *path, size_t section_idx,
     return -1;
 
   if (debugfile) {
-    debug_file = find_debug_via_buildid(e);
-    if (!debug_file)
-      debug_file = find_debug_via_debuglink(e, path, 0); // No crc for speed
-
+    debug_file = find_debug_file(e, path, 0);
     if (!debug_file) {
       err = -1;
       goto exit;

@@ -15,6 +15,7 @@ from __future__ import print_function
 from os import getpid
 from functools import partial
 from bcc import BPF
+from bcc.containers import filter_by_containers
 import errno
 import argparse
 from time import strftime
@@ -27,6 +28,9 @@ examples = """examples:
     ./capable -K          # add kernel stacks to trace
     ./capable -U          # add user-space stacks to trace
     ./capable -x          # extra fields: show TID and INSETID columns
+    ./capable --unique    # don't repeat stacks for the same pid or cgroup
+    ./capable --cgroupmap mappath  # only trace cgroups in this BPF map
+    ./capable --mntnsmap mappath   # only trace mount namespaces in the map
 """
 parser = argparse.ArgumentParser(
     description="Trace security capability checks",
@@ -42,6 +46,12 @@ parser.add_argument("-U", "--user-stack", action="store_true",
     help="output user stack trace")
 parser.add_argument("-x", "--extra", action="store_true",
     help="show extra fields in TID and INSETID columns")
+parser.add_argument("--cgroupmap",
+    help="trace cgroups in this BPF map only")
+parser.add_argument("--mntnsmap",
+    help="trace mount namespaces in this BPF map only")
+parser.add_argument("--unique", action="store_true",
+    help="don't repeat stacks for the same pid or cgroup")
 args = parser.parse_args()
 debug = 0
 
@@ -87,6 +97,9 @@ capabilities = {
     35: "CAP_WAKE_ALARM",
     36: "CAP_BLOCK_SUSPEND",
     37: "CAP_AUDIT_READ",
+    38: "CAP_PERFMON",
+    39: "CAP_BPF",
+    40: "CAP_CHECKPOINT_RESTORE",
 }
 
 class Enum(set):
@@ -122,6 +135,23 @@ struct data_t {
 
 BPF_PERF_OUTPUT(events);
 
+#if UNIQUESET
+struct repeat_t {
+   int cap;
+   u32 tgid;
+#if CGROUPSET
+   u64 cgroupid;
+#endif
+#ifdef KERNEL_STACKS
+   int kernel_stack_id;
+#endif
+#ifdef USER_STACKS
+   int user_stack_id;
+#endif
+};
+BPF_HASH(seen, struct repeat_t, u64);
+#endif
+
 #if defined(USER_STACKS) || defined(KERNEL_STACKS)
 BPF_STACK_TRACE(stacks, 2048);
 #endif
@@ -147,6 +177,10 @@ int kprobe__cap_capable(struct pt_regs *ctx, const struct cred *cred,
     FILTER2
     FILTER3
 
+    if (container_should_be_filtered()) {
+        return 0;
+    }
+
     u32 uid = bpf_get_current_uid_gid();
     struct data_t data = {.tgid = tgid, .pid = pid, .uid = uid, .cap = cap, .audit = audit, .insetid = insetid};
 #ifdef KERNEL_STACKS
@@ -155,6 +189,28 @@ int kprobe__cap_capable(struct pt_regs *ctx, const struct cred *cred,
 #ifdef USER_STACKS
     data.user_stack_id = stacks.get_stackid(ctx, BPF_F_USER_STACK);
 #endif
+
+#if UNIQUESET
+    struct repeat_t repeat = {0,};
+    repeat.cap = cap;
+#if CGROUP_ID_SET
+    repeat.cgroupid = bpf_get_current_cgroup_id();
+#else
+    repeat.tgid = tgid;
+#endif
+#ifdef KERNEL_STACKS
+    repeat.kernel_stack_id = data.kernel_stack_id;
+#endif
+#ifdef USER_STACKS
+    repeat.user_stack_id = data.user_stack_id;
+#endif
+    if (seen.lookup(&repeat) != NULL) {
+        return 0;
+    }
+    u64 zero = 0;
+    seen.update(&repeat, &zero);
+#endif
+
     bpf_get_current_comm(&data.comm, sizeof(data.comm));
     events.perf_submit(ctx, &data, sizeof(data));
 
@@ -174,6 +230,11 @@ bpf_text = bpf_text.replace('FILTER1', '')
 bpf_text = bpf_text.replace('FILTER2', '')
 bpf_text = bpf_text.replace('FILTER3',
     'if (pid == %s) { return 0; }' % getpid())
+bpf_text = filter_by_containers(args) + bpf_text
+if args.unique:
+    bpf_text = bpf_text.replace('UNIQUESET', '1')
+else:
+    bpf_text = bpf_text.replace('UNIQUESET', '0')
 if debug:
     print(bpf_text)
 

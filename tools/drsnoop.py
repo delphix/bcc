@@ -8,11 +8,11 @@
 # direct reclaim begin, as well as a starting timestamp for calculating
 # latency.
 #
-# Copyright (c) 2019 Ethercflow
+# Copyright (c) 2019 Wenbo Zhang
 # Licensed under the Apache License, Version 2.0 (the "License")
 #
-# 20-Feb-2019   Ethercflow   Created this.
-# 09-Mar-2019   Ethercflow   Updated for show sys mem info.
+# 20-Feb-2019   Wenbo Zhang   Created this.
+# 09-Mar-2019   Wenbo Zhang   Updated for show sys mem info.
 
 from __future__ import print_function
 from bcc import ArgString, BPF
@@ -128,7 +128,7 @@ TRACEPOINT_PROBE(vmscan, mm_vmscan_direct_reclaim_begin) {
     if (bpf_get_current_comm(&val.name, sizeof(val.name)) == 0) {
         val.id = id;
         val.ts = bpf_ktime_get_ns();
-        bpf_probe_read(&val.vm_stat, sizeof(val.vm_stat), (const void *)%s);
+        bpf_probe_read_kernel(&val.vm_stat, sizeof(val.vm_stat), (const void *)%s);
         start.update(&id, &val);
     }
     return 0;
@@ -150,8 +150,8 @@ TRACEPOINT_PROBE(vmscan, mm_vmscan_direct_reclaim_end) {
     data.ts = ts / 1000;
     data.id = valp->id;
     data.uid = bpf_get_current_uid_gid();
-    bpf_probe_read(&data.name, sizeof(data.name), valp->name);
-    bpf_probe_read(&data.vm_stat, sizeof(data.vm_stat), valp->vm_stat);
+    bpf_probe_read_kernel(&data.name, sizeof(data.name), valp->name);
+    bpf_probe_read_kernel(&data.vm_stat, sizeof(data.vm_stat), valp->vm_stat);
     data.nr_reclaimed = args->nr_reclaimed;
 
     events.perf_submit(args, &data, sizeof(data));
