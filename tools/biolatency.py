@@ -15,15 +15,17 @@ from __future__ import print_function
 from bcc import BPF
 from time import sleep, strftime
 import argparse
+import ctypes as ct
 
 # arguments
 examples = """examples:
-    ./biolatency            # summarize block I/O latency as a histogram
-    ./biolatency 1 10       # print 1 second summaries, 10 times
-    ./biolatency -mT 1      # 1s summaries, milliseconds, and timestamps
-    ./biolatency -Q         # include OS queued time in I/O time
-    ./biolatency -D         # show each disk device separately
-    ./biolatency -F         # show I/O flags separately
+    ./biolatency                    # summarize block I/O latency as a histogram
+    ./biolatency 1 10               # print 1 second summaries, 10 times
+    ./biolatency -mT 1              # 1s summaries, milliseconds, and timestamps
+    ./biolatency -Q                 # include OS queued time in I/O time
+    ./biolatency -D                 # show each disk device separately
+    ./biolatency -F                 # show I/O flags separately
+    ./biolatency -j                 # print a dictionary
 """
 parser = argparse.ArgumentParser(
     description="Summarize block device I/O latency as a histogram",
@@ -45,9 +47,13 @@ parser.add_argument("count", nargs="?", default=99999999,
     help="number of outputs")
 parser.add_argument("--ebpf", action="store_true",
     help=argparse.SUPPRESS)
+parser.add_argument("-j", "--json", action="store_true",
+    help="json output")
+
 args = parser.parse_args()
 countdown = int(args.count)
 debug = 0
+
 if args.flags and args.disks:
     print("ERROR: can only use -D or -F. Exiting.")
     exit()
@@ -141,7 +147,8 @@ else:
 b.attach_kprobe(event="blk_account_io_done",
     fn_name="trace_req_done")
 
-print("Tracing block device I/O... Hit Ctrl-C to end.")
+if not args.json:
+    print("Tracing block device I/O... Hit Ctrl-C to end.")
 
 # see blk_fill_rwbs():
 req_opf = {
@@ -203,15 +210,29 @@ while (1):
         exiting = 1
 
     print()
-    if args.timestamp:
-        print("%-8s\n" % strftime("%H:%M:%S"), end="")
+    if args.json:
+        if args.timestamp:
+            print("%-8s\n" % strftime("%H:%M:%S"), end="")
 
-    if args.flags:
-        dist.print_log2_hist(label, "flags", flags_print)
+        if args.flags:
+            dist.print_json_hist(label, "flags", flags_print)
+
+        else:
+            dist.print_json_hist(label)
+
     else:
-        dist.print_log2_hist(label, "disk")
+        if args.timestamp:
+            print("%-8s\n" % strftime("%H:%M:%S"), end="")
+            
+        if args.flags:
+            dist.print_log2_hist(label, "flags", flags_print)
+
+        else:
+            dist.print_log2_hist(label, "disk")
+
     dist.clear()
 
     countdown -= 1
     if exiting or countdown == 0:
         exit()
+

@@ -784,16 +784,40 @@ static long (*bpf_d_path)(struct path *path, char *buf, u32 sz) =
 static long (*bpf_copy_from_user)(void *dst, u32 size, const void *user_ptr) =
   (void *)BPF_FUNC_copy_from_user;
 
-static long (*bpf_snprintf_btf)(char *str, __u32 str_size, struct btf_ptr *ptr,
-				__u32 btf_ptr_size, __u64 flags) =
+static long (*bpf_snprintf_btf)(char *str, u32 str_size, struct btf_ptr *ptr,
+				u32 btf_ptr_size, u64 flags) =
   (void *)BPF_FUNC_snprintf_btf;
 static long (*bpf_seq_printf_btf)(struct seq_file *m, struct btf_ptr *ptr,
-				  __u32 ptr_size, __u64 flags) =
+				  u32 ptr_size, u64 flags) =
   (void *)BPF_FUNC_seq_printf_btf;
-static __u64 (*bpf_skb_cgroup_classid)(struct __sk_buff *skb) =
+static u64 (*bpf_skb_cgroup_classid)(struct sk_buff *skb) =
   (void *)BPF_FUNC_skb_cgroup_classid;
-static long (*bpf_redirect_neigh)(__u32 ifindex, __u64 flags) =
+static long (*bpf_redirect_neigh)(u32 ifindex, struct bpf_redir_neigh *params,
+				  u64 flags) =
   (void *)BPF_FUNC_redirect_neigh;
+static void * (*bpf_per_cpu_ptr)(const void *percpu_ptr, u32 cpu) =
+  (void *)BPF_FUNC_per_cpu_ptr;
+static void * (*bpf_this_cpu_ptr)(const void *percpu_ptr) =
+  (void *)BPF_FUNC_this_cpu_ptr;
+static long (*bpf_redirect_peer)(u32 ifindex, u64 flags) = (void *)BPF_FUNC_redirect_peer;
+
+static void *(*bpf_task_storage_get)(void *map, struct task_struct *task,
+				     void *value, __u64 flags) =
+  (void *)BPF_FUNC_task_storage_get;
+static long (*bpf_task_storage_delete)(void *map, struct task_struct *task) =
+  (void *)BPF_FUNC_task_storage_delete;
+static struct task_struct *(*bpf_get_current_task_btf)(void) =
+  (void *)BPF_FUNC_get_current_task_btf;
+struct linux_binprm;
+static long (*bpf_bprm_opts_set)(struct linux_binprm *bprm, __u64 flags) =
+  (void *)BPF_FUNC_bprm_opts_set;
+static __u64 (*bpf_ktime_get_coarse_ns)(void) = (void *)BPF_FUNC_ktime_get_coarse_ns;
+struct inode;
+static long (*bpf_ima_inode_hash)(struct inode *inode, void *dst, __u32 size) =
+  (void *)BPF_FUNC_ima_inode_hash;
+struct file;
+static struct socket *(*bpf_sock_from_file)(struct file *file) =
+  (void *)BPF_FUNC_sock_from_file;
 
 /* llvm builtin functions that eBPF C program may use to
  * emit BPF_LD_ABS and BPF_LD_IND instructions
@@ -1114,6 +1138,26 @@ int bpf_usdt_readarg_p(int argc, struct pt_regs *ctx, void *buf, u64 len) asm("l
 #define PT_REGS_IP(x)		((x)->pc)
 #else
 #error "bcc does not support this platform yet"
+#endif
+
+#if defined(CONFIG_ARCH_HAS_SYSCALL_WRAPPER) && !defined(__s390x__)
+#define PT_REGS_SYSCALL_CTX(ctx)	((struct pt_regs *)PT_REGS_PARM1(ctx))
+#else
+#define PT_REGS_SYSCALL_CTX(ctx)	(ctx)
+#endif
+/* Helpers for syscall params. Pass in a ctx returned from PT_REGS_SYSCALL_CTX.
+ */
+#define PT_REGS_PARM1_SYSCALL(ctx)	PT_REGS_PARM1(ctx)
+#define PT_REGS_PARM2_SYSCALL(ctx)	PT_REGS_PARM2(ctx)
+#define PT_REGS_PARM3_SYSCALL(ctx)	PT_REGS_PARM3(ctx)
+#if defined(bpf_target_x86)
+#define PT_REGS_PARM4_SYSCALL(ctx)	((ctx)->r10) /* for syscall only */
+#else
+#define PT_REGS_PARM4_SYSCALL(ctx)	PT_REGS_PARM4(ctx)
+#endif
+#define PT_REGS_PARM5_SYSCALL(ctx)	PT_REGS_PARM5(ctx)
+#ifdef PT_REGS_PARM6
+#define PT_REGS_PARM6_SYSCALL(ctx)	PT_REGS_PARM6(ctx)
 #endif
 
 #define lock_xadd(ptr, val) ((void)__sync_fetch_and_add(ptr, val))
