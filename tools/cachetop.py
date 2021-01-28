@@ -107,7 +107,7 @@ def get_processes_stats(
             misses = (apcl + apd)
 
             # rtaccess is the read hit % during the sample period.
-            # wtaccess is the write hit % during the smaple period.
+            # wtaccess is the write hit % during the sample period.
             if mpa > 0:
                 rtaccess = float(mpa) / (access + misses)
             if apcl > 0:
@@ -136,7 +136,7 @@ def handle_loop(stdscr, args):
     stdscr.nodelay(1)
     # set default sorting field
     sort_field = FIELDS.index(DEFAULT_FIELD)
-    sort_reverse = False
+    sort_reverse = True
 
     # load BPF program
     bpf_text = """

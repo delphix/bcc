@@ -50,7 +50,6 @@ else:
 
 # load BPF program
 b = BPF(text = """
-#define KBUILD_MODNAME "foo"
 #include <uapi/linux/bpf.h>
 #include <linux/in.h>
 #include <linux/if_ether.h>
@@ -141,7 +140,7 @@ int xdp_prog1(struct CTXTYPE *ctx) {
     else
         index = 0;
 
-    if (h_proto == IPPROTO_UDP) {
+    if (index == IPPROTO_UDP) {
         swap_src_dst_mac(data);
         rc = XDP_TX;
     }

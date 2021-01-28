@@ -16,6 +16,8 @@
 from __future__ import print_function
 from bcc import BPF
 import argparse
+import binascii
+import textwrap
 
 # arguments
 examples = """examples:
@@ -25,6 +27,7 @@ examples = """examples:
     ./sslsniff --no-openssl # don't show OpenSSL calls
     ./sslsniff --no-gnutls  # don't show GnuTLS calls
     ./sslsniff --no-nss     # don't show NSS calls
+    ./sslsniff --hexdump    # show data as hex instead of trying to decode it as UTF-8
 """
 parser = argparse.ArgumentParser(
     description="Sniff SSL data",
@@ -43,6 +46,8 @@ parser.add_argument('-d', '--debug', dest='debug', action='count', default=0,
                     help='debug mode.')
 parser.add_argument("--ebpf", action="store_true",
                     help=argparse.SUPPRESS)
+parser.add_argument("--hexdump", action="store_true", dest="hexdump",
+                    help="show data as hexdump instead of trying to decode it as UTF-8")
 args = parser.parse_args()
 
 
@@ -72,7 +77,7 @@ int probe_SSL_write(struct pt_regs *ctx, void *ssl, void *buf, int num) {
         bpf_get_current_comm(&__data.comm, sizeof(__data.comm));
 
         if ( buf != 0) {
-                bpf_probe_read(&__data.v0, sizeof(__data.v0), buf);
+                bpf_probe_read_user(&__data.v0, sizeof(__data.v0), buf);
         }
 
         perf_SSL_write.perf_submit(ctx, &__data, sizeof(__data));
@@ -108,7 +113,7 @@ int probe_SSL_read_exit(struct pt_regs *ctx, void *ssl, void *buf, int num) {
         bpf_get_current_comm(&__data.comm, sizeof(__data.comm));
 
         if (bufp != 0) {
-                bpf_probe_read(&__data.v0, sizeof(__data.v0), (char *)*bufp);
+                bpf_probe_read_user(&__data.v0, sizeof(__data.v0), (char *)*bufp);
         }
 
         bufs.delete(&pid);
@@ -192,7 +197,7 @@ def print_event(cpu, data, size, rw, evt):
 
     # Filter events by command
     if args.comm:
-        if not args.comm == event.comm:
+        if not args.comm == event.comm.decode('utf-8', 'replace'):
             return
 
     if start == 0:
@@ -209,9 +214,13 @@ def print_event(cpu, data, size, rw, evt):
                 " bytes lost) " + "-" * 5
 
     fmt = "%-12s %-18.9f %-16s %-6d %-6d\n%s\n%s\n%s\n\n"
+    if args.hexdump:
+        unwrapped_data = binascii.hexlify(event.v0)
+        data = textwrap.fill(unwrapped_data.decode('utf-8', 'replace'),width=32)
+    else:
+        data = event.v0.decode('utf-8', 'replace')
     print(fmt % (rw, time_s, event.comm.decode('utf-8', 'replace'),
-                 event.pid, event.len, s_mark,
-                 event.v0.decode('utf-8', 'replace'), e_mark))
+                 event.pid, event.len, s_mark, data, e_mark))
 
 b["perf_SSL_write"].open_perf_buffer(print_event_write)
 b["perf_SSL_read"].open_perf_buffer(print_event_read)

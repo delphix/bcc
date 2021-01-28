@@ -19,8 +19,7 @@
 #include <string.h>
 #include "linux/btf.h"
 #include "libbpf.h"
-#include "libbpf/src/libbpf.h"
-#include "libbpf/src/btf.h"
+#include "bcc_libbpf_inc.h"
 #include <vector>
 
 #define BCC_MAX_ERRNO       4095
@@ -48,7 +47,8 @@ int32_t BTFStringTable::addString(std::string S) {
   return Offset;
 }
 
-BTF::BTF(bool debug) : debug_(debug), btf_(nullptr), btf_ext_(nullptr) {
+BTF::BTF(bool debug, sec_map_def &sections) : debug_(debug),
+    btf_(nullptr), btf_ext_(nullptr), sections_(sections) {
   if (!debug)
     libbpf_set_print(NULL);
 }
@@ -67,6 +67,92 @@ void BTF::warning(const char *format, ...) {
   va_start(args, format);
   vfprintf(stderr, format, args);
   va_end(args);
+}
+
+void BTF::fixup_btf(uint8_t *type_sec, uintptr_t type_sec_size,
+                    char *strings) {
+  uint8_t *next_type = type_sec;
+  uint8_t *end_type = type_sec + type_sec_size;
+  int base_size = sizeof(struct btf_type);
+
+  while (next_type < end_type) {
+    struct btf_type *t = (struct btf_type *)next_type;
+    unsigned short vlen = BTF_INFO_VLEN(t->info);
+
+    next_type += base_size;
+
+    switch(BTF_INFO_KIND(t->info)) {
+    case BTF_KIND_FWD:
+    case BTF_KIND_CONST:
+    case BTF_KIND_VOLATILE:
+    case BTF_KIND_RESTRICT:
+    case BTF_KIND_PTR:
+    case BTF_KIND_TYPEDEF:
+      break;
+    case BTF_KIND_FUNC:
+      // sanitize vlen to be 0 since bcc does not
+      // care about func scope (static, global, extern) yet.
+      t->info &= ~0xffff;
+      break;
+    case BTF_KIND_INT:
+      next_type += sizeof(uint32_t);
+      break;
+    case BTF_KIND_ENUM:
+      next_type += vlen * sizeof(struct btf_enum);
+      break;
+    case BTF_KIND_ARRAY:
+      next_type += sizeof(struct btf_array);
+      break;
+    case BTF_KIND_STRUCT:
+    case BTF_KIND_UNION:
+      next_type += vlen * sizeof(struct btf_member);
+      break;
+    case BTF_KIND_FUNC_PROTO:
+      next_type += vlen * sizeof(struct btf_param);
+      break;
+    case BTF_KIND_VAR: {
+      // BTF_KIND_VAR is not used by bcc, so
+      // a sanitization to convert it to an int.
+      // One extra __u32 after btf_type.
+      if (sizeof(struct btf_var) == 4) {
+        t->name_off = 0;
+        t->info = BTF_KIND_INT << 24;
+        t->size = 4;
+
+        unsigned *intp = (unsigned *)next_type;
+        *intp = BTF_INT_BITS(t->size << 3);
+      }
+
+      next_type += sizeof(struct btf_var);
+      break;
+    }
+    case BTF_KIND_DATASEC: {
+      // bcc does not use BTF_KIND_DATASEC, so
+      // a sanitization here to convert it to a list
+      // of void pointers.
+      // btf_var_secinfo is 3 __u32's for each var.
+      if (sizeof(struct btf_var_secinfo) == 12) {
+        t->name_off = 0;
+        t->info = BTF_KIND_PTR << 24;
+        t->type = 0;
+
+        struct btf_type *typep = (struct btf_type *)next_type;
+        for (int i = 0; i < vlen; i++) {
+          typep->name_off = 0;
+          typep->info = BTF_KIND_PTR << 24;
+          typep->type = 0;
+          typep++;
+        }
+      }
+
+      next_type += vlen * sizeof(struct btf_var_secinfo);
+      break;
+    }
+    default:
+      // Something not understood
+      return;
+    }
+  }
 }
 
 // The compiler doesn't have source code for remapped files.
@@ -98,11 +184,14 @@ void BTF::adjust(uint8_t *btf_sec, uintptr_t btf_sec_size,
     LineCaches[it->first] = std::move(LineCache);
   }
 
-  // Check the LineInfo table and add missing lines
-
   struct btf_header *hdr = (struct btf_header *)btf_sec;
-  struct btf_ext_header *ehdr = (struct btf_ext_header *)btf_ext_sec;
+  struct bcc_btf_ext_header *ehdr = (struct bcc_btf_ext_header *)btf_ext_sec;
 
+  // Fixup btf for old kernels or kernel requirements.
+  fixup_btf(btf_sec + hdr->hdr_len + hdr->type_off, hdr->type_len,
+            (char *)(btf_sec + hdr->hdr_len + hdr->str_off));
+
+  // Check the LineInfo table and add missing lines
   char *strings = (char *)(btf_sec + hdr->hdr_len + hdr->str_off);
   unsigned orig_strings_len = hdr->str_len;
   unsigned *linfo_s = (unsigned *)(btf_ext_sec + ehdr->hdr_len + ehdr->line_info_off);

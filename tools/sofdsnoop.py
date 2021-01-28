@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 
 # arguments
 examples = """examples:
-    ./sofdsnoop           # trace file descriptors passes
+    ./sofdsnoop           # trace passed file descriptors
     ./sofdsnoop -T        # include timestamps
     ./sofdsnoop -p 181    # only trace PID 181
     ./sofdsnoop -t 123    # only trace TID 123
@@ -105,7 +105,7 @@ static int sent_1(struct pt_regs *ctx, struct val_t *val, int num, void *data)
 {
     val->fd_cnt = min(num, MAX_FD);
 
-    if (bpf_probe_read(&val->fd[0], MAX_FD * sizeof(int), data))
+    if (bpf_probe_read_kernel(&val->fd[0], MAX_FD * sizeof(int), data))
         return -1;
 
     events.perf_submit(ctx, val, sizeof(*val));

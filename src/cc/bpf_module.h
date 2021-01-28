@@ -88,10 +88,15 @@ class BPFModule {
                        const void *val);
   void load_btf(sec_map_def &sections);
   int load_maps(sec_map_def &sections);
+  int create_maps(std::map<std::string, std::pair<int, int>> &map_tids,
+                  std::map<int, int> &map_fds,
+                  std::map<std::string, int> &inner_map_fds,
+                  bool for_inner_map);
 
  public:
   BPFModule(unsigned flags, TableStorage *ts = nullptr, bool rw_engine_enabled = true,
-            const std::string &maps_ns = "", bool allow_rlimit = true);
+            const std::string &maps_ns = "", bool allow_rlimit = true,
+            const char *dev_name = nullptr);
   ~BPFModule();
   int free_bcc_memory();
   int load_b(const std::string &filename, const std::string &proto_filename);
@@ -138,7 +143,11 @@ class BPFModule {
   int bcc_func_load(int prog_type, const char *name,
                     const struct bpf_insn *insns, int prog_len,
                     const char *license, unsigned kern_version,
-                    int log_level, char *log_buf, unsigned log_buf_size);
+                    int log_level, char *log_buf, unsigned log_buf_size,
+                    const char *dev_name = nullptr);
+  int bcc_func_attach(int prog_fd, int attachable_fd,
+                      int attach_type, unsigned int flags);
+  int bcc_func_detach(int prog_fd, int attachable_fd, int attach_type);
   size_t perf_event_fields(const char *) const;
   const char * perf_event_field(const char *, size_t i) const;
 
@@ -168,6 +177,7 @@ class BPFModule {
   std::unique_ptr<TableStorage> local_ts_;
   BTF *btf_;
   fake_fd_map_def fake_fd_map_;
+  unsigned int ifindex_;
 
   // map of events -- key: event name, value: event fields
   std::map<std::string, std::vector<std::string>> perf_events_;

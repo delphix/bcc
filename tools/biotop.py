@@ -148,17 +148,19 @@ int trace_req_completion(struct pt_regs *ctx, struct request *req)
     whop = whobyreq.lookup(&req);
     if (whop == 0) {
         // missed pid who, save stats as pid 0
-        valp = counts.lookup_or_init(&info, &zero);
+        valp = counts.lookup_or_try_init(&info, &zero);
     } else {
         info.pid = whop->pid;
         __builtin_memcpy(&info.name, whop->name, sizeof(info.name));
-        valp = counts.lookup_or_init(&info, &zero);
+        valp = counts.lookup_or_try_init(&info, &zero);
     }
 
-    // save stats
-    valp->us += delta_us;
-    valp->bytes += req->__data_len;
-    valp->io++;
+    if (valp) {
+        // save stats
+        valp->us += delta_us;
+        valp->bytes += req->__data_len;
+        valp->io++;
+    }
 
     start.delete(&req);
     whobyreq.delete(&req);
@@ -176,7 +178,7 @@ b.attach_kprobe(event="blk_account_io_start", fn_name="trace_pid_start")
 if BPF.get_kprobe_functions(b'blk_start_request'):
     b.attach_kprobe(event="blk_start_request", fn_name="trace_req_start")
 b.attach_kprobe(event="blk_mq_start_request", fn_name="trace_req_start")
-b.attach_kprobe(event="blk_account_io_completion",
+b.attach_kprobe(event="blk_account_io_done",
     fn_name="trace_req_completion")
 
 print('Tracing... Output every %d secs. Hit Ctrl-C to end' % interval)

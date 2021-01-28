@@ -52,8 +52,7 @@
 // TODO: Remove this when CentOS 6 support is not needed anymore
 #include "setns.h"
 
-#include "libbpf/src/bpf.h"
-#include "libbpf/src/libbpf.h"
+#include "bcc_libbpf_inc.h"
 
 // TODO: remove these defines when linux-libc-dev exports them properly
 
@@ -206,6 +205,50 @@ static struct bpf_helper helpers[] = {
   {"strtoul", "5.2"},
   {"sk_storage_get", "5.2"},
   {"sk_storage_delete", "5.2"},
+  {"send_signal", "5.3"},
+  {"tcp_gen_syncookie", "5.3"},
+  {"skb_output", "5.5"},
+  {"probe_read_user", "5.5"},
+  {"probe_read_kernel", "5.5"},
+  {"probe_read_user_str", "5.5"},
+  {"probe_read_kernel_str", "5.5"},
+  {"tcp_send_ack", "5.5"},
+  {"send_signal_thread", "5.5"},
+  {"jiffies64", "5.5"},
+  {"read_branch_records", "5.6"},
+  {"get_ns_current_pid_tgid", "5.6"},
+  {"xdp_output", "5.6"},
+  {"get_netns_cookie", "5.6"},
+  {"get_current_ancestor_cgroup_id", "5.6"},
+  {"sk_assign", "5.6"},
+  {"ktime_get_boot_ns", "5.7"},
+  {"seq_printf", "5.7"},
+  {"seq_write", "5.7"},
+  {"sk_cgroup_id", "5.7"},
+  {"sk_ancestor_cgroup_id", "5.7"},
+  {"csum_level", "5.7"},
+  {"ringbuf_output", "5.8"},
+  {"ringbuf_reserve", "5.8"},
+  {"ringbuf_submit", "5.8"},
+  {"ringbuf_discard", "5.8"},
+  {"ringbuf_query", "5.8"},
+  {"skc_to_tcp6_sock", "5.9"},
+  {"skc_to_tcp_sock", "5.9"},
+  {"skc_to_tcp_timewait_sock", "5.9"},
+  {"skc_to_tcp_request_sock", "5.9"},
+  {"skc_to_udp6_sock", "5.9"},
+  {"get_task_stack", "5.9"},
+  {"load_hdr_opt", "5.10"},
+  {"store_hdr_opt", "5.10"},
+  {"reserve_hdr_opt", "5.10"},
+  {"inode_storage_get", "5.10"},
+  {"inode_storage_delete", "5.10"},
+  {"d_path", "5.10"},
+  {"copy_from_user", "5.10"},
+  {"snprintf_btf", "5.10"},
+  {"seq_printf_btf", "5.10"},
+  {"skb_cgroup_classid", "5.10"},
+  {"redirect_neigh", "5.10"},
 };
 
 static uint64_t ptr_to_u64(void *ptr)
@@ -215,7 +258,7 @@ static uint64_t ptr_to_u64(void *ptr)
 
 int bcc_create_map_xattr(struct bpf_create_map_attr *attr, bool allow_rlimit)
 {
-  size_t name_len = attr->name ? strlen(attr->name) : 0;
+  unsigned name_len = attr->name ? strlen(attr->name) : 0;
   char map_name[BPF_OBJ_NAME_LEN] = {};
 
   memcpy(map_name, attr->name, min(name_len, BPF_OBJ_NAME_LEN - 1));
@@ -296,6 +339,11 @@ int bpf_delete_elem(int fd, void *key)
   return bpf_map_delete_elem(fd, key);
 }
 
+int bpf_lookup_and_delete(int fd, void *key, void *value)
+{
+  return bpf_map_lookup_and_delete_elem(fd, key, value);
+}
+
 int bpf_get_first_key(int fd, void *key, size_t key_size)
 {
   int i, res;
@@ -365,8 +413,8 @@ static void bpf_print_hints(int ret, char *log)
   if (strstr(log, "invalid mem access 'inv'") != NULL) {
     fprintf(stderr, "HINT: The invalid mem access 'inv' error can happen "
       "if you try to dereference memory without first using "
-      "bpf_probe_read() to copy it to the BPF stack. Sometimes the "
-      "bpf_probe_read is automatic by the bcc rewriter, other times "
+      "bpf_probe_read_kernel() to copy it to the BPF stack. Sometimes the "
+      "bpf_probe_read_kernel() is automatic by the bcc rewriter, other times "
       "you'll need to be explicit.\n\n");
   }
 
@@ -498,25 +546,18 @@ int bpf_prog_get_tag(int fd, unsigned long long *ptag)
 int bcc_prog_load_xattr(struct bpf_load_program_attr *attr, int prog_len,
                         char *log_buf, unsigned log_buf_size, bool allow_rlimit)
 {
-  size_t name_len = attr->name ? strlen(attr->name) : 0;
+  unsigned name_len = attr->name ? strlen(attr->name) : 0;
   char *tmp_log_buf = NULL, *attr_log_buf = NULL;
   unsigned tmp_log_buf_size = 0, attr_log_buf_size = 0;
-  int ret = 0, name_offset = 0;
+  int ret = 0, name_offset = 0, expected_attach_type = 0;
   char prog_name[BPF_OBJ_NAME_LEN] = {};
 
   unsigned insns_cnt = prog_len / sizeof(struct bpf_insn);
-  if (insns_cnt > BPF_MAXINSNS) {
-    errno = EINVAL;
-    fprintf(stderr,
-            "bpf: %s. Program %s too large (%u insns), at most %d insns\n\n",
-            strerror(errno), attr->name, insns_cnt, BPF_MAXINSNS);
-    return -1;
-  }
   attr->insns_cnt = insns_cnt;
 
   if (attr->log_level > 0) {
     if (log_buf_size > 0) {
-      // Use user-provided log buffer if availiable.
+      // Use user-provided log buffer if available.
       log_buf[0] = 0;
       attr_log_buf = log_buf;
       attr_log_buf_size = log_buf_size;
@@ -539,10 +580,43 @@ int bcc_prog_load_xattr(struct bpf_load_program_attr *attr, int prog_len,
   if (name_len) {
     if (strncmp(attr->name, "kprobe__", 8) == 0)
       name_offset = 8;
+    else if (strncmp(attr->name, "kretprobe__", 11) == 0)
+      name_offset = 11;
     else if (strncmp(attr->name, "tracepoint__", 12) == 0)
       name_offset = 12;
     else if (strncmp(attr->name, "raw_tracepoint__", 16) == 0)
       name_offset = 16;
+    else if (strncmp(attr->name, "kfunc__", 7) == 0) {
+      name_offset = 7;
+      expected_attach_type = BPF_TRACE_FENTRY;
+    } else if (strncmp(attr->name, "kretfunc__", 10) == 0) {
+      name_offset = 10;
+      expected_attach_type = BPF_TRACE_FEXIT;
+    } else if (strncmp(attr->name, "lsm__", 5) == 0) {
+      name_offset = 5;
+      expected_attach_type = BPF_LSM_MAC;
+    } else if (strncmp(attr->name, "bpf_iter__", 10) == 0) {
+      name_offset = 10;
+      expected_attach_type = BPF_TRACE_ITER;
+    }
+
+    if (attr->prog_type == BPF_PROG_TYPE_TRACING ||
+        attr->prog_type == BPF_PROG_TYPE_LSM) {
+      ret = libbpf_find_vmlinux_btf_id(attr->name + name_offset,
+                                       expected_attach_type);
+      if (ret == -EINVAL) {
+        fprintf(stderr, "bpf: vmlinux BTF is not found\n");
+        return ret;
+      } else if (ret < 0) {
+        fprintf(stderr, "bpf: %s is not found in vmlinux BTF\n",
+                attr->name + name_offset);
+        return ret;
+      }
+
+      attr->attach_btf_id = ret;
+      attr->expected_attach_type = expected_attach_type;
+    }
+
     memcpy(prog_name, attr->name + name_offset,
            min(name_len - name_offset, BPF_OBJ_NAME_LEN - 1));
     attr->name = prog_name;
@@ -587,6 +661,13 @@ int bcc_prog_load_xattr(struct bpf_load_program_attr *attr, int prog_len,
       if (setrlimit(RLIMIT_MEMLOCK, &rl) == 0)
         ret = bpf_load_program_xattr(attr, attr_log_buf, attr_log_buf_size);
     }
+  }
+
+  if (ret < 0 && errno == E2BIG) {
+    fprintf(stderr,
+            "bpf: %s. Program %s too large (%u insns), at most %d insns\n\n",
+            strerror(errno), attr->name, insns_cnt, BPF_MAXINSNS);
+    return -1;
   }
 
   // The load has failed. Handle log message.
@@ -660,7 +741,8 @@ int bcc_prog_load(enum bpf_prog_type prog_type, const char *name,
   attr.name = name;
   attr.insns = insns;
   attr.license = license;
-  attr.kern_version = kern_version;
+  if (prog_type != BPF_PROG_TYPE_TRACING && prog_type != BPF_PROG_TYPE_EXT)
+    attr.kern_version = kern_version;
   attr.log_level = log_level;
   return bcc_prog_load_xattr(&attr, prog_len, log_buf, log_buf_size, true);
 }
@@ -751,12 +833,12 @@ static int bpf_get_retprobe_bit(const char *event_type)
 }
 
 /*
- * new kernel API allows creating [k,u]probe with perf_event_open, which
- * makes it easier to clean up the [k,u]probe. This function tries to
- * create pfd with the new API.
+ * Kernel API with e12f03d ("perf/core: Implement the 'perf_kprobe' PMU") allows
+ * creating [k,u]probe with perf_event_open, which makes it easier to clean up
+ * the [k,u]probe. This function tries to create pfd with the perf_kprobe PMU.
  */
 static int bpf_try_perf_event_open_with_probe(const char *name, uint64_t offs,
-             int pid, char *event_type, int is_return)
+             int pid, const char *event_type, int is_return)
 {
   struct perf_event_attr attr = {};
   int type = bpf_find_probe_type(event_type);
@@ -869,74 +951,102 @@ static int bpf_attach_tracing_event(int progfd, const char *event_path, int pid,
   return 0;
 }
 
-static int create_kprobe_event(char *buf, const char *ev_name,
-                               enum bpf_probe_attach_type attach_type,
-                               const char *fn_name, uint64_t fn_offset,
-                               int maxactive)
+/* Creates an [uk]probe using debugfs.
+ * On success, the path to the probe is placed in buf (which is assumed to be of size PATH_MAX).
+ */
+static int create_probe_event(char *buf, const char *ev_name,
+                              enum bpf_probe_attach_type attach_type,
+                              const char *config1, uint64_t offset,
+                              const char *event_type, pid_t pid, int maxactive)
 {
-  int kfd;
-  char ev_alias[128];
-  static unsigned int buf_size = 256;
+  int kfd = -1, res = -1;
+  char ev_alias[256];
+  bool is_kprobe = strncmp("kprobe", event_type, 6) == 0;
 
-  kfd = open("/sys/kernel/debug/tracing/kprobe_events", O_WRONLY | O_APPEND, 0);
+  snprintf(buf, PATH_MAX, "/sys/kernel/debug/tracing/%s_events", event_type);
+  kfd = open(buf, O_WRONLY | O_APPEND, 0);
   if (kfd < 0) {
-    fprintf(stderr, "open(/sys/kernel/debug/tracing/kprobe_events): %s\n",
+    fprintf(stderr, "%s: open(%s): %s\n", __func__, buf,
             strerror(errno));
     return -1;
   }
 
-  snprintf(ev_alias, sizeof(ev_alias), "%s_bcc_%d", ev_name, getpid());
+  res = snprintf(ev_alias, sizeof(ev_alias), "%s_bcc_%d", ev_name, getpid());
+  if (res < 0 || res >= sizeof(ev_alias)) {
+    fprintf(stderr, "Event name (%s) is too long for buffer\n", ev_name);
+    close(kfd);
+    goto error;
+  }
 
-  if (fn_offset > 0 && attach_type == BPF_PROBE_ENTRY)
-    snprintf(buf, buf_size, "p:kprobes/%s %s+%"PRIu64,
-             ev_alias, fn_name, fn_offset);
-  else if (maxactive > 0 && attach_type == BPF_PROBE_RETURN)
-    snprintf(buf, buf_size, "r%d:kprobes/%s %s",
-             maxactive, ev_alias, fn_name);
-  else
-    snprintf(buf, buf_size, "%c:kprobes/%s %s",
-             attach_type == BPF_PROBE_ENTRY ? 'p' : 'r',
-             ev_alias, fn_name);
+  if (is_kprobe) {
+    if (offset > 0 && attach_type == BPF_PROBE_ENTRY)
+      snprintf(buf, PATH_MAX, "p:kprobes/%s %s+%"PRIu64,
+               ev_alias, config1, offset);
+    else if (maxactive > 0 && attach_type == BPF_PROBE_RETURN)
+      snprintf(buf, PATH_MAX, "r%d:kprobes/%s %s",
+               maxactive, ev_alias, config1);
+    else
+      snprintf(buf, PATH_MAX, "%c:kprobes/%s %s",
+               attach_type == BPF_PROBE_ENTRY ? 'p' : 'r',
+               ev_alias, config1);
+  } else {
+    res = snprintf(buf, PATH_MAX, "%c:%ss/%s %s:0x%lx", attach_type==BPF_PROBE_ENTRY ? 'p' : 'r',
+                   event_type, ev_alias, config1, (unsigned long)offset);
+    if (res < 0 || res >= PATH_MAX) {
+      fprintf(stderr, "Event alias (%s) too long for buffer\n", ev_alias);
+      close(kfd);
+      return -1;
+    }
+  }
 
   if (write(kfd, buf, strlen(buf)) < 0) {
     if (errno == ENOENT)
-      fprintf(stderr, "cannot attach kprobe, probe entry may not exist\n");
+      fprintf(stderr, "cannot attach %s, probe entry may not exist\n", event_type);
     else
-      fprintf(stderr, "cannot attach kprobe, %s\n", strerror(errno));
+      fprintf(stderr, "cannot attach %s, %s\n", event_type, strerror(errno));
     close(kfd);
-    return -1;
+    goto error;
   }
   close(kfd);
-  snprintf(buf, buf_size, "/sys/kernel/debug/tracing/events/kprobes/%s",
-           ev_alias);
+  snprintf(buf, PATH_MAX, "/sys/kernel/debug/tracing/events/%ss/%s",
+           event_type, ev_alias);
   return 0;
+error:
+  return -1;
 }
 
-int bpf_attach_kprobe(int progfd, enum bpf_probe_attach_type attach_type,
-                      const char *ev_name, const char *fn_name, uint64_t fn_offset,
-                      int maxactive)
+// config1 could be either kprobe_func or uprobe_path,
+// see bpf_try_perf_event_open_with_probe().
+static int bpf_attach_probe(int progfd, enum bpf_probe_attach_type attach_type,
+                            const char *ev_name, const char *config1, const char* event_type,
+                            uint64_t offset, pid_t pid, int maxactive)
 {
   int kfd, pfd = -1;
-  char buf[256], fname[256];
+  char buf[PATH_MAX], fname[256];
+  bool is_kprobe = strncmp("kprobe", event_type, 6) == 0;
 
   if (maxactive <= 0)
-    // Try create the kprobe Perf Event with perf_event_open API.
-    pfd = bpf_try_perf_event_open_with_probe(fn_name, fn_offset, -1, "kprobe",
+    // Try create the [k,u]probe Perf Event with perf_event_open API.
+    pfd = bpf_try_perf_event_open_with_probe(config1, offset, pid, event_type,
                                              attach_type != BPF_PROBE_ENTRY);
 
-  // If failed, most likely Kernel doesn't support the new perf_event_open API
-  // yet. Try create the event using debugfs.
+  // If failed, most likely Kernel doesn't support the perf_kprobe PMU
+  // (e12f03d "perf/core: Implement the 'perf_kprobe' PMU") yet.
+  // Try create the event using debugfs.
   if (pfd < 0) {
-    if (create_kprobe_event(buf, ev_name, attach_type, fn_name, fn_offset,
-                            maxactive) < 0)
+    if (create_probe_event(buf, ev_name, attach_type, config1, offset,
+                           event_type, pid, maxactive) < 0)
       goto error;
 
     // If we're using maxactive, we need to check that the event was created
     // under the expected name.  If debugfs doesn't support maxactive yet
     // (kernel < 4.12), the event is created under a different name; we need to
     // delete that event and start again without maxactive.
-    if (maxactive > 0 && attach_type == BPF_PROBE_RETURN) {
-      snprintf(fname, sizeof(fname), "%s/id", buf);
+    if (is_kprobe && maxactive > 0 && attach_type == BPF_PROBE_RETURN) {
+      if (snprintf(fname, sizeof(fname), "%s/id", buf) >= sizeof(fname)) {
+	fprintf(stderr, "filename (%s) is too long for buffer\n", buf);
+	goto error;
+      }
       if (access(fname, F_OK) == -1) {
         // Deleting kprobe event with incorrect name.
         kfd = open("/sys/kernel/debug/tracing/kprobe_events",
@@ -958,131 +1068,11 @@ int bpf_attach_kprobe(int progfd, enum bpf_probe_attach_type attach_type,
         close(kfd);
 
         // Re-creating kprobe event without maxactive.
-        if (create_kprobe_event(buf, ev_name, attach_type, fn_name,
-                                fn_offset, 0) < 0)
+        if (create_probe_event(buf, ev_name, attach_type, config1,
+                               offset, event_type, pid, 0) < 0)
           goto error;
       }
     }
-  }
-  // If perf_event_open succeeded, bpf_attach_tracing_event will use the created
-  // Perf Event FD directly and buf would be empty and unused.
-  // Otherwise it will read the event ID from the path in buf, create the
-  // Perf Event event using that ID, and updated value of pfd.
-  if (bpf_attach_tracing_event(progfd, buf, -1 /* PID */, &pfd) == 0)
-    return pfd;
-
-error:
-  bpf_close_perf_event_fd(pfd);
-  return -1;
-}
-
-static int enter_mount_ns(int pid) {
-  struct stat self_stat, target_stat;
-  int self_fd = -1, target_fd = -1;
-  char buf[64];
-
-  if (pid < 0)
-    return -1;
-
-  if ((size_t)snprintf(buf, sizeof(buf), "/proc/%d/ns/mnt", pid) >= sizeof(buf))
-    return -1;
-
-  self_fd = open("/proc/self/ns/mnt", O_RDONLY);
-  if (self_fd < 0) {
-    perror("open(/proc/self/ns/mnt)");
-    return -1;
-  }
-
-  target_fd = open(buf, O_RDONLY);
-  if (target_fd < 0) {
-    perror("open(/proc/<pid>/ns/mnt)");
-    goto error;
-  }
-
-  if (fstat(self_fd, &self_stat)) {
-    perror("fstat(self_fd)");
-    goto error;
-  }
-
-  if (fstat(target_fd, &target_stat)) {
-    perror("fstat(target_fd)");
-    goto error;
-  }
-
-  // both target and current ns are same, avoid setns and close all fds
-  if (self_stat.st_ino == target_stat.st_ino)
-    goto error;
-
-  if (setns(target_fd, CLONE_NEWNS)) {
-    perror("setns(target)");
-    goto error;
-  }
-
-  close(target_fd);
-  return self_fd;
-
-error:
-  if (self_fd >= 0)
-    close(self_fd);
-  if (target_fd >= 0)
-    close(target_fd);
-  return -1;
-}
-
-static void exit_mount_ns(int fd) {
-  if (fd < 0)
-    return;
-
-  if (setns(fd, CLONE_NEWNS))
-    perror("setns");
-  close(fd);
-}
-
-int bpf_attach_uprobe(int progfd, enum bpf_probe_attach_type attach_type,
-                      const char *ev_name, const char *binary_path,
-                      uint64_t offset, pid_t pid)
-{
-  char buf[PATH_MAX];
-  char event_alias[PATH_MAX];
-  static char *event_type = "uprobe";
-  int res, kfd = -1, pfd = -1, ns_fd = -1;
-  // Try create the uprobe Perf Event with perf_event_open API.
-  pfd = bpf_try_perf_event_open_with_probe(binary_path, offset, pid, event_type,
-                                           attach_type != BPF_PROBE_ENTRY);
-  // If failed, most likely Kernel doesn't support the new perf_event_open API
-  // yet. Try create the event using debugfs.
-  if (pfd < 0) {
-    snprintf(buf, sizeof(buf), "/sys/kernel/debug/tracing/%s_events", event_type);
-    kfd = open(buf, O_WRONLY | O_APPEND, 0);
-    if (kfd < 0) {
-      fprintf(stderr, "open(%s): %s\n", buf, strerror(errno));
-      goto error;
-    }
-
-    res = snprintf(event_alias, sizeof(event_alias), "%s_bcc_%d", ev_name, getpid());
-    if (res < 0 || res >= sizeof(event_alias)) {
-      fprintf(stderr, "Event name (%s) is too long for buffer\n", ev_name);
-      goto error;
-    }
-    res = snprintf(buf, sizeof(buf), "%c:%ss/%s %s:0x%lx", attach_type==BPF_PROBE_ENTRY ? 'p' : 'r',
-                   event_type, event_alias, binary_path, (unsigned long)offset);
-    if (res < 0 || res >= sizeof(buf)) {
-      fprintf(stderr, "Event alias (%s) too long for buffer\n", event_alias);
-      goto error;
-    }
-
-    ns_fd = enter_mount_ns(pid);
-    if (write(kfd, buf, strlen(buf)) < 0) {
-      if (errno == EINVAL)
-        fprintf(stderr, "check dmesg output for possible cause\n");
-      goto error;
-    }
-    close(kfd);
-    kfd = -1;
-    exit_mount_ns(ns_fd);
-    ns_fd = -1;
-
-    snprintf(buf, sizeof(buf), "/sys/kernel/debug/tracing/events/%ss/%s", event_type, event_alias);
   }
   // If perf_event_open succeeded, bpf_attach_tracing_event will use the created
   // Perf Event FD directly and buf would be empty and unused.
@@ -1092,11 +1082,27 @@ int bpf_attach_uprobe(int progfd, enum bpf_probe_attach_type attach_type,
     return pfd;
 
 error:
-  if (kfd >= 0)
-    close(kfd);
-  exit_mount_ns(ns_fd);
   bpf_close_perf_event_fd(pfd);
   return -1;
+}
+
+int bpf_attach_kprobe(int progfd, enum bpf_probe_attach_type attach_type,
+                      const char *ev_name, const char *fn_name,
+                      uint64_t fn_offset, int maxactive)
+{
+  return bpf_attach_probe(progfd, attach_type,
+                          ev_name, fn_name, "kprobe",
+                          fn_offset, -1, maxactive);
+}
+
+int bpf_attach_uprobe(int progfd, enum bpf_probe_attach_type attach_type,
+                      const char *ev_name, const char *binary_path,
+                      uint64_t offset, pid_t pid)
+{
+
+  return bpf_attach_probe(progfd, attach_type,
+                          ev_name, binary_path, "uprobe",
+                          offset, pid, -1);
 }
 
 static int bpf_detach_probe(const char *ev_name, const char *event_type)
@@ -1177,7 +1183,6 @@ int bpf_detach_uprobe(const char *ev_name)
   return bpf_detach_probe(ev_name, "uprobe");
 }
 
-
 int bpf_attach_tracepoint(int progfd, const char *tp_category,
                           const char *tp_name)
 {
@@ -1201,13 +1206,38 @@ int bpf_detach_tracepoint(const char *tp_category, const char *tp_name) {
   return 0;
 }
 
-int bpf_attach_raw_tracepoint(int progfd, char *tp_name)
+int bpf_attach_raw_tracepoint(int progfd, const char *tp_name)
 {
   int ret;
 
   ret = bpf_raw_tracepoint_open(tp_name, progfd);
   if (ret < 0)
     fprintf(stderr, "bpf_attach_raw_tracepoint (%s): %s\n", tp_name, strerror(errno));
+  return ret;
+}
+
+bool bpf_has_kernel_btf(void)
+{
+  return libbpf_find_vmlinux_btf_id("bpf_prog_put", 0) > 0;
+}
+
+int bpf_attach_kfunc(int prog_fd)
+{
+  int ret;
+
+  ret = bpf_raw_tracepoint_open(NULL, prog_fd);
+  if (ret < 0)
+    fprintf(stderr, "bpf_attach_raw_tracepoint (kfunc): %s\n", strerror(errno));
+  return ret;
+}
+
+int bpf_attach_lsm(int prog_fd)
+{
+  int ret;
+
+  ret = bpf_raw_tracepoint_open(NULL, prog_fd);
+  if (ret < 0)
+    fprintf(stderr, "bpf_attach_raw_tracepoint (lsm): %s\n", strerror(errno));
   return ret;
 }
 
@@ -1403,4 +1433,51 @@ int bpf_close_perf_event_fd(int fd) {
     }
   }
   return error;
+}
+
+/* Create a new ringbuf manager to manage ringbuf associated with
+ * map_fd, associating it with callback sample_cb. */
+void * bpf_new_ringbuf(int map_fd, ring_buffer_sample_fn sample_cb, void *ctx) {
+    return ring_buffer__new(map_fd, sample_cb, ctx, NULL);
+}
+
+/* Free the ringbuf manager rb and all ring buffers associated with it. */
+void bpf_free_ringbuf(struct ring_buffer *rb) {
+    ring_buffer__free(rb);
+}
+
+/* Add a new ring buffer associated with map_fd to the ring buffer manager rb,
+ * associating it with callback sample_cb. */
+int bpf_add_ringbuf(struct ring_buffer *rb, int map_fd,
+                    ring_buffer_sample_fn sample_cb, void *ctx) {
+    return ring_buffer__add(rb, map_fd, sample_cb, ctx);
+}
+
+/* Poll for available data and consume, if data is available.  Returns number
+ * of records consumed, or a negative number if any callbacks returned an
+ * error. */
+int bpf_poll_ringbuf(struct ring_buffer *rb, int timeout_ms) {
+    return ring_buffer__poll(rb, timeout_ms);
+}
+
+/* Consume available data _without_ polling. Good for use cases where low
+ * latency is desired over performance impact.  Returns number of records
+ * consumed, or a negative number if any callbacks returned an error. */
+int bpf_consume_ringbuf(struct ring_buffer *rb) {
+    return ring_buffer__consume(rb);
+}
+
+int bcc_iter_attach(int prog_fd, union bpf_iter_link_info *link_info,
+                    uint32_t link_info_len)
+{
+    DECLARE_LIBBPF_OPTS(bpf_link_create_opts, link_create_opts);
+
+    link_create_opts.iter_info = link_info;
+    link_create_opts.iter_info_len = link_info_len;
+    return bpf_link_create(prog_fd, 0, BPF_TRACE_ITER, &link_create_opts);
+}
+
+int bcc_iter_create(int link_fd)
+{
+    return bpf_iter_create(link_fd);
 }

@@ -29,8 +29,10 @@ class TestPercpu(unittest.TestCase):
         int hello_world(void *ctx) {
             u32 key=0;
             u64 value = 0, *val;
-            val = stats.lookup_or_init(&key, &value);
-            *val += 1;
+            val = stats.lookup_or_try_init(&key, &value);
+            if (val) {
+                *val += 1;
+            }
             return 0;
         }
         """
@@ -59,8 +61,10 @@ class TestPercpu(unittest.TestCase):
         int hello_world(void *ctx) {
             u32 key=0;
             u32 value = 0, *val;
-            val = stats.lookup_or_init(&key, &value);
-            *val += 1;
+            val = stats.lookup_or_try_init(&key, &value);
+            if (val) {
+                *val += 1;
+            }
             return 0;
         }
         """
@@ -93,9 +97,11 @@ class TestPercpu(unittest.TestCase):
         int hello_world(void *ctx) {
             u32 key=0;
             counter value = {0,0}, *val;
-            val = stats.lookup_or_init(&key, &value);
-            val->c1 += 1;
-            val->c2 += 1;
+            val = stats.lookup_or_try_init(&key, &value);
+            if (val) {
+                val->c1 += 1;
+                val->c2 += 1;
+            }
             return 0;
         }
         """

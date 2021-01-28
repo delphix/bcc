@@ -158,13 +158,15 @@ int trace_entry(struct pt_regs *ctx) {
 #endif
     READ_CLASS
     READ_METHOD
-    bpf_probe_read(&data.method.clazz, sizeof(data.method.clazz),
+    bpf_probe_read_user(&data.method.clazz, sizeof(data.method.clazz),
                    (void *)clazz);
-    bpf_probe_read(&data.method.method, sizeof(data.method.method),
+    bpf_probe_read_user(&data.method.method, sizeof(data.method.method),
                    (void *)method);
 #ifndef LATENCY
-    valp = counts.lookup_or_init(&data.method, &val);
-    ++(*valp);
+    valp = counts.lookup_or_try_init(&data.method, &val);
+    if (valp) {
+        ++(*valp);
+    }
 #endif
 #ifdef LATENCY
     entry.update(&data, &timestamp);
@@ -180,17 +182,19 @@ int trace_return(struct pt_regs *ctx) {
     data.pid = bpf_get_current_pid_tgid();
     READ_CLASS
     READ_METHOD
-    bpf_probe_read(&data.method.clazz, sizeof(data.method.clazz),
+    bpf_probe_read_user(&data.method.clazz, sizeof(data.method.clazz),
                    (void *)clazz);
-    bpf_probe_read(&data.method.method, sizeof(data.method.method),
+    bpf_probe_read_user(&data.method.method, sizeof(data.method.method),
                    (void *)method);
     entry_timestamp = entry.lookup(&data);
     if (!entry_timestamp) {
         return 0;   // missed the entry event
     }
-    info = times.lookup_or_init(&data.method, &zero);
-    info->num_calls += 1;
-    info->total_ns += bpf_ktime_get_ns() - *entry_timestamp;
+    info = times.lookup_or_try_init(&data.method, &zero);
+    if (info) {
+        info->num_calls += 1;
+        info->total_ns += bpf_ktime_get_ns() - *entry_timestamp;
+    }
     entry.delete(&data);
     return 0;
 }
@@ -209,8 +213,10 @@ TRACEPOINT_PROBE(raw_syscalls, sys_enter) {
     sysentry.update(&pid, &data);
 #endif
 #ifndef LATENCY
-    valp = syscounts.lookup_or_init(&id, &val);
-    ++(*valp);
+    valp = syscounts.lookup_or_try_init(&id, &val);
+    if (valp) {
+        ++(*valp);
+    }
 #endif
     return 0;
 }
@@ -226,9 +232,11 @@ TRACEPOINT_PROBE(raw_syscalls, sys_exit) {
         return 0;   // missed the entry event
     }
     id = e->id;
-    info = systimes.lookup_or_init(&id, &zero);
-    info->num_calls += 1;
-    info->total_ns += bpf_ktime_get_ns() - e->timestamp;
+    info = systimes.lookup_or_try_init(&id, &zero);
+    if (info) {
+        info->num_calls += 1;
+        info->total_ns += bpf_ktime_get_ns() - e->timestamp;
+    }
     sysentry.delete(&pid);
     return 0;
 }

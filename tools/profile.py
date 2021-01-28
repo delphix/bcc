@@ -24,10 +24,11 @@
 #
 # 15-Jul-2016   Brendan Gregg   Created this.
 # 20-Oct-2016      "      "     Switched to use the new 4.9 support.
-# 26-Jan-2019      "      "     Changed to exclude CPU idle by default. 
+# 26-Jan-2019      "      "     Changed to exclude CPU idle by default.
 
 from __future__ import print_function
 from bcc import BPF, PerfType, PerfSWConfig
+from bcc.containers import filter_by_containers
 from sys import stderr
 from time import sleep
 import argparse
@@ -57,7 +58,7 @@ def positive_nonzero_int(val):
     return ival
 
 def stack_id_err(stack_id):
-    # -EFAULT in get_stackid normally means the stack-trace is not availible,
+    # -EFAULT in get_stackid normally means the stack-trace is not available,
     # Such as getting kernel stack trace in userspace code
     return (stack_id < 0) and (stack_id != -errno.EFAULT)
 
@@ -72,6 +73,8 @@ examples = """examples:
     ./profile -L 185      # only profile thread with TID 185
     ./profile -U          # only show user space stacks (no kernel)
     ./profile -K          # only show kernel space stacks (no user)
+    ./profile --cgroupmap mappath  # only trace cgroups in this BPF map
+    ./profile --mntnsmap mappath   # only trace mount namespaces in the map
 """
 parser = argparse.ArgumentParser(
     description="Profile CPU stack traces at a timed interval",
@@ -112,6 +115,10 @@ parser.add_argument("-C", "--cpu", type=int, default=-1,
     help="cpu number to run profile on")
 parser.add_argument("--ebpf", action="store_true",
     help=argparse.SUPPRESS)
+parser.add_argument("--cgroupmap",
+    help="trace cgroups in this BPF map only")
+parser.add_argument("--mntnsmap",
+    help="trace mount namespaces in this BPF map only")
 
 # option logic
 args = parser.parse_args()
@@ -155,6 +162,10 @@ int do_perf_event(struct bpf_perf_event_data *ctx) {
 
     if (!(THREAD_FILTER))
         return 0;
+
+    if (container_should_be_filtered()) {
+        return 0;
+    }
 
     // create map key
     struct key_t key = {.pid = tgid};
@@ -232,6 +243,7 @@ else:
     stack_context = "user + kernel"
 bpf_text = bpf_text.replace('USER_STACK_GET', user_stack_get)
 bpf_text = bpf_text.replace('KERNEL_STACK_GET', kernel_stack_get)
+bpf_text = filter_by_containers(args) + bpf_text
 
 sample_freq = 0
 sample_period = 0
@@ -293,19 +305,18 @@ def aksym(addr):
 
 # output stacks
 missing_stacks = 0
-has_enomem = False
+has_collision = False
 counts = b.get_table("counts")
 stack_traces = b.get_table("stack_traces")
-need_delimiter = args.delimited and not (args.kernel_stacks_only or
-                                         args.user_stacks_only)
 for k, v in sorted(counts.items(), key=lambda counts: counts[1].value):
     # handle get_stackid errors
     if not args.user_stacks_only and stack_id_err(k.kernel_stack_id):
         missing_stacks += 1
-        has_enomem = has_enomem or k.kernel_stack_id == -errno.ENOMEM
+        # hash collision (-EEXIST) suggests that the map size may be too small
+        has_collision = has_collision or k.kernel_stack_id == -errno.EEXIST
     if not args.kernel_stacks_only and stack_id_err(k.user_stack_id):
         missing_stacks += 1
-        has_enomem = has_enomem or k.user_stack_id == -errno.ENOMEM
+        has_collision = has_collision or k.user_stack_id == -errno.EEXIST
 
     user_stack = [] if k.user_stack_id < 0 else \
         stack_traces.walk(k.user_stack_id)
@@ -330,13 +341,13 @@ for k, v in sorted(counts.items(), key=lambda counts: counts[1].value):
         # hash collision (-EEXIST), we still print a placeholder for consistency
         if not args.kernel_stacks_only:
             if stack_id_err(k.user_stack_id):
-                line.append("[Missed User Stack]")
+                line.append(b"[Missed User Stack]")
             else:
                 line.extend([b.sym(addr, k.pid) for addr in reversed(user_stack)])
         if not args.user_stacks_only:
-            line.extend(["-"] if (need_delimiter and k.kernel_stack_id >= 0 and k.user_stack_id >= 0) else [])
+            line.extend([b"-"] if (need_delimiter and k.kernel_stack_id >= 0 and k.user_stack_id >= 0) else [])
             if stack_id_err(k.kernel_stack_id):
-                line.append("[Missed Kernel Stack]")
+                line.append(b"[Missed Kernel Stack]")
             else:
                 line.extend([aksym(addr) for addr in reversed(kernel_stack)])
         print("%s %d" % (b";".join(line).decode('utf-8', 'replace'), v.value))
@@ -361,7 +372,7 @@ for k, v in sorted(counts.items(), key=lambda counts: counts[1].value):
 
 # check missing
 if missing_stacks > 0:
-    enomem_str = "" if not has_enomem else \
+    enomem_str = "" if not has_collision else \
         " Consider increasing --stack-storage-size."
     print("WARNING: %d stack traces could not be displayed.%s" %
         (missing_stacks, enomem_str),

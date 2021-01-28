@@ -21,7 +21,7 @@ from time import strftime
 import argparse
 
 examples = """examples:
-    ./gethostlatency           # trace all TCP accept()s
+    ./gethostlatency           # time getaddrinfo/gethostbyname[2] calls
     ./gethostlatency -p 181    # only trace PID 181
 """
 parser = argparse.ArgumentParser(
@@ -64,7 +64,7 @@ int do_entry(struct pt_regs *ctx) {
     u32 pid = bpf_get_current_pid_tgid();
 
     if (bpf_get_current_comm(&val.comm, sizeof(val.comm)) == 0) {
-        bpf_probe_read(&val.host, sizeof(val.host),
+        bpf_probe_read_user(&val.host, sizeof(val.host),
                        (void *)PT_REGS_PARM1(ctx));
         val.pid = bpf_get_current_pid_tgid();
         val.ts = bpf_ktime_get_ns();
@@ -86,8 +86,8 @@ int do_return(struct pt_regs *ctx) {
     if (valp == 0)
         return 0;       // missed start
 
-    bpf_probe_read(&data.comm, sizeof(data.comm), valp->comm);
-    bpf_probe_read(&data.host, sizeof(data.host), (void *)valp->host);
+    bpf_probe_read_kernel(&data.comm, sizeof(data.comm), valp->comm);
+    bpf_probe_read_kernel(&data.host, sizeof(data.host), (void *)valp->host);
     data.pid = valp->pid;
     data.delta = tsp - valp->ts;
     events.perf_submit(ctx, &data, sizeof(data));

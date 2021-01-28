@@ -32,8 +32,8 @@ from time import strftime
 # arguments
 examples = """examples:
     ./tcplife           # trace all TCP connect()s
-    ./tcplife -t        # include time column (HH:MM:SS)
-    ./tcplife -w        # wider colums (fit IPv6)
+    ./tcplife -T        # include time column (HH:MM:SS)
+    ./tcplife -w        # wider columns (fit IPv6)
     ./tcplife -stT      # csv output, with times & timestamps
     ./tcplife -p 181    # only trace PID 181
     ./tcplife -L 80     # only trace local port 80
@@ -66,7 +66,6 @@ debug = 0
 # define BPF program
 bpf_text = """
 #include <uapi/linux/ptrace.h>
-#define KBUILD_MODNAME "foo"
 #include <linux/tcp.h>
 #include <net/sock.h>
 #include <bcc/proto.h>
@@ -206,7 +205,7 @@ int kprobe__tcp_set_state(struct pt_regs *ctx, struct sock *sk, int state)
         if (mep == 0) {
             bpf_get_current_comm(&data4.task, sizeof(data4.task));
         } else {
-            bpf_probe_read(&data4.task, sizeof(data4.task), (void *)mep->task);
+            bpf_probe_read_kernel(&data4.task, sizeof(data4.task), (void *)mep->task);
         }
         ipv4_events.perf_submit(ctx, &data4, sizeof(data4));
 
@@ -216,9 +215,9 @@ int kprobe__tcp_set_state(struct pt_regs *ctx, struct sock *sk, int state)
         data6.rx_b = rx_b;
         data6.tx_b = tx_b;
         data6.ts_us = bpf_ktime_get_ns() / 1000;
-        bpf_probe_read(&data6.saddr, sizeof(data6.saddr),
+        bpf_probe_read_kernel(&data6.saddr, sizeof(data6.saddr),
             sk->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
-        bpf_probe_read(&data6.daddr, sizeof(data6.daddr),
+        bpf_probe_read_kernel(&data6.daddr, sizeof(data6.daddr),
             sk->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
         // a workaround until data6 compiles with separate lport/dport
         data6.ports = dport + ((0ULL + lport) << 32);
@@ -226,7 +225,7 @@ int kprobe__tcp_set_state(struct pt_regs *ctx, struct sock *sk, int state)
         if (mep == 0) {
             bpf_get_current_comm(&data6.task, sizeof(data6.task));
         } else {
-            bpf_probe_read(&data6.task, sizeof(data6.task), (void *)mep->task);
+            bpf_probe_read_kernel(&data6.task, sizeof(data6.task), (void *)mep->task);
         }
         ipv6_events.perf_submit(ctx, &data6, sizeof(data6));
     }
@@ -332,7 +331,7 @@ TRACEPOINT_PROBE(sock, inet_sock_set_state)
         if (mep == 0) {
             bpf_get_current_comm(&data4.task, sizeof(data4.task));
         } else {
-            bpf_probe_read(&data4.task, sizeof(data4.task), (void *)mep->task);
+            bpf_probe_read_kernel(&data4.task, sizeof(data4.task), (void *)mep->task);
         }
         ipv4_events.perf_submit(args, &data4, sizeof(data4));
 
@@ -350,7 +349,7 @@ TRACEPOINT_PROBE(sock, inet_sock_set_state)
         if (mep == 0) {
             bpf_get_current_comm(&data6.task, sizeof(data6.task));
         } else {
-            bpf_probe_read(&data6.task, sizeof(data6.task), (void *)mep->task);
+            bpf_probe_read_kernel(&data6.task, sizeof(data6.task), (void *)mep->task);
         }
         ipv6_events.perf_submit(args, &data6, sizeof(data6));
     }

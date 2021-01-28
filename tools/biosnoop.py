@@ -108,7 +108,8 @@ int trace_req_completion(struct pt_regs *ctx, struct request *req)
     valp = infobyreq.lookup(&req);
     if (valp == 0) {
         data.len = req->__data_len;
-        strcpy(data.name, "?");
+        data.name[0] = '?';
+        data.name[1] = 0;
     } else {
         if (##QUEUE##) {
             data.qdelta = *tsp - valp->ts;
@@ -116,9 +117,9 @@ int trace_req_completion(struct pt_regs *ctx, struct request *req)
         data.pid = valp->pid;
         data.len = req->__data_len;
         data.sector = req->__sector;
-        bpf_probe_read(&data.name, sizeof(data.name), valp->name);
+        bpf_probe_read_kernel(&data.name, sizeof(data.name), valp->name);
         struct gendisk *rq_disk = req->rq_disk;
-        bpf_probe_read(&data.disk_name, sizeof(data.disk_name),
+        bpf_probe_read_kernel(&data.disk_name, sizeof(data.disk_name),
                        rq_disk->disk_name);
     }
 
@@ -159,7 +160,7 @@ b.attach_kprobe(event="blk_account_io_start", fn_name="trace_pid_start")
 if BPF.get_kprobe_functions(b'blk_start_request'):
     b.attach_kprobe(event="blk_start_request", fn_name="trace_req_start")
 b.attach_kprobe(event="blk_mq_start_request", fn_name="trace_req_start")
-b.attach_kprobe(event="blk_account_io_completion",
+b.attach_kprobe(event="blk_account_io_done",
     fn_name="trace_req_completion")
 
 # header

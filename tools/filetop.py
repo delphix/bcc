@@ -40,7 +40,7 @@ parser.add_argument("-r", "--maxrows", default=20,
     help="maximum rows to print, default 20")
 parser.add_argument("-s", "--sort", default="all",
     choices=["all", "reads", "writes", "rbytes", "wbytes"],
-    help="sort column, default rbytes")
+    help="sort column, default all")
 parser.add_argument("-p", "--pid", type=int, metavar="PID", dest="tgid",
     help="trace this PID only")
 parser.add_argument("interval", nargs="?", default=1,
@@ -108,7 +108,7 @@ static int do_entry(struct pt_regs *ctx, struct file *file,
     struct info_t info = {.pid = pid};
     bpf_get_current_comm(&info.comm, sizeof(info.comm));
     info.name_len = d_name.len;
-    bpf_probe_read(&info.name, sizeof(info.name), d_name.name);
+    bpf_probe_read_kernel(&info.name, sizeof(info.name), d_name.name);
     if (S_ISREG(mode)) {
         info.type = 'R';
     } else if (S_ISSOCK(mode)) {
@@ -118,13 +118,15 @@ static int do_entry(struct pt_regs *ctx, struct file *file,
     }
 
     struct val_t *valp, zero = {};
-    valp = counts.lookup_or_init(&info, &zero);
-    if (is_read) {
-        valp->reads++;
-        valp->rbytes += count;
-    } else {
-        valp->writes++;
-        valp->wbytes += count;
+    valp = counts.lookup_or_try_init(&info, &zero);
+    if (valp) {
+        if (is_read) {
+            valp->reads++;
+            valp->rbytes += count;
+        } else {
+            valp->writes++;
+            valp->wbytes += count;
+        }
     }
 
     return 0;

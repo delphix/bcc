@@ -21,7 +21,7 @@ import sys
 
 # arguments
 def usage():
-    print("USAGE: mysqld_latency PID [min_ms]")
+    print("USAGE: mysqld_qslower PID [min_ms]")
     exit()
 if len(sys.argv) < 2:
     usage()
@@ -81,7 +81,7 @@ int do_done(struct pt_regs *ctx) {
     if (delta >= """ + str(min_ns) + """) {
         // populate and emit data struct
         struct data_t data = {.pid = pid, .ts = sp->ts, .delta = delta};
-        bpf_probe_read(&data.query, sizeof(data.query), (void *)sp->query);
+        bpf_probe_read_user(&data.query, sizeof(data.query), (void *)sp->query);
         events.perf_submit(ctx, &data, sizeof(data));
     }
 

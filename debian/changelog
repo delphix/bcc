@@ -1,3 +1,94 @@
+bcc (0.16.0-1) unstable; urgency=low
+
+  * Support for kernel up to 5.8
+  * trace.py: support kprobe/uprobe func offset
+  * support raw perf config for perf_event_open in python
+  * add BPFQueueStackTable support
+  * added Ringbuf support support
+  * libbpf-tools: readahead, biosnoop, bitesize, tcpconnlat, biopattern, biostacks
+  * bug fixes and some additional arguments for tools
+
+ -- Yonghong Song <ys114321@gmail.com>  Sat, 22 Aug 2020 17:00:00 +0000
+
+bcc (0.15.0-1) unstable; urgency=low
+
+  * Support for kernel up to 5.7
+  * new tools: funcinterval.py, dirtop.py
+  * support lsm bpf programs
+  * support multiple pid/tids for offwaketime
+  * usdt: add helpers to set semaphore values
+  * turn off x86 jump table optimization during jit compilation
+  * add support to use bpf_probe_read[_str_}{_user,kernel} in all bpf
+  *    programs, fail back to old bpf_probe_read[_str] for old kernels
+  * tools: add filtering by mount namespace
+  * libbpf-tools: cpudist, syscount, execsnoop, vfsstat
+  * lots of bug fixes and a few additional arguments for tools
+
+ -- Yonghong Song <ys114321@gmail.com>  Mon, 19 Jun 2020 17:00:00 +0000
+
+bcc (0.14.0-1) unstable; urgency=low
+
+  * Support for kernel up to 5.6
+  * new tools: biolatpcts.py
+  * libbpf-tools: tools based on CORE and libbpf library directly
+  * add --cgroupmap to various tools, filtering based cgroup
+  * support kfunc (faster kprobe) for vfsstat, klockstat and opensnoop
+  * lots of bug fixes and a few additional arguments for tools
+
+ -- Yonghong Song <ys114321@gmail.com>  Mon, 20 Apr 2020 17:00:00 +0000
+
+bcc (0.13.0-1) unstable; urgency=low
+
+  * Support for kernel up to 5.5
+  * bindsnoop tool to track tcp/udp bind information
+  * added compile-once run-everywhere based libbpf-tools, currently
+    only runqslower is implemented.
+  * new map support: sockhash, sockmap, sk_storage, cgroup_storage
+  * enable to run github actions on the diff
+  * cgroupmap based cgroup filtering for opensnoop, execsnoop and bindsnoop.
+  * lots of bug fixes.
+
+ -- Yonghong Song <ys114321@gmail.com>  Wed, 19 Feb 2020 17:00:00 +0000
+
+bcc (0.12.0-1) unstable; urgency=low
+
+  * Support for kernel up to 5.4
+  * klockstat tool to track kernel mutex lock statistics
+  * cmake option CMAKE_USE_LIBBPF_PACKAGE to build a bcc shared library
+    linking with distro libbpf_static.a
+  * new map.lookup_or_try_init() API to remove hidden return in
+    map.lookup_or_init()
+  * BPF_ARRAY_OF_MAPS and BPF_HASH_OF_MAPS support
+  * support symbol offset for uprobe in both C++ and python API,
+    kprobe already has the support
+  * bug fixes for trace.py, tcpretrans.py, runqslower.py, etc.
+
+ -- Yonghong Song <ys114321@gmail.com>  Tue, 10 Dec 2019 17:00:00 +0000
+
+bcc (0.11.0-1) unstable; urgency=low
+
+  * Support for kernel up to 5.3
+  * Corresponding libbpf submodule release is v0.0.5
+  * Fix USDT issue with multi-threaded applications
+  * Fixed the early return behavior of lookup_or_init
+  * Support for nic hardware offload
+  * Fixed and Enabled Travis CI
+  * A lot of tools change with added new options, etc.
+
+ -- Yonghong Song <ys114321@gmail.com>  Tue, 03 Oct 2019 17:00:00 +0000
+
+bcc (0.10.0-1) unstable; urgency=low
+
+  * Support for kernel up to 5.1
+  * corresponding libbpf submodule release is v0.0.3
+  * support for reading kernel headers from /proc
+  * libbpf.{a,so} renamed to libcc_bpf.{a,so}
+  * new common options for some tools
+  * new tool: drsnoop
+  * s390 USDT support
+
+ -- Brenden Blanco <bblanco@gmail.com>  Tue, 28 May 2019 17:00:00 +0000
+
 bcc (0.9.0-1) unstable; urgency=low
 
   * Adds support for BTF

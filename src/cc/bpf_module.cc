@@ -19,7 +19,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
+#include <set>
 #include <linux/bpf.h>
+#include <net/if.h>
 
 #include <llvm/ExecutionEngine/MCJIT.h>
 #include <llvm/ExecutionEngine/SectionMemoryManager.h>
@@ -43,7 +45,7 @@
 #include "exported_files.h"
 #include "libbpf.h"
 #include "bcc_btf.h"
-#include "libbpf/src/bpf.h"
+#include "bcc_libbpf_inc.h"
 
 namespace ebpf {
 
@@ -93,7 +95,8 @@ class MyMemoryManager : public SectionMemoryManager {
 };
 
 BPFModule::BPFModule(unsigned flags, TableStorage *ts, bool rw_engine_enabled,
-                     const std::string &maps_ns, bool allow_rlimit)
+                     const std::string &maps_ns, bool allow_rlimit,
+                     const char *dev_name)
     : flags_(flags),
       rw_engine_enabled_(rw_engine_enabled && bpf_module_rw_engine_enabled()),
       used_b_loader_(false),
@@ -102,6 +105,7 @@ BPFModule::BPFModule(unsigned flags, TableStorage *ts, bool rw_engine_enabled,
       id_(std::to_string((uintptr_t)this)),
       maps_ns_(maps_ns),
       ts_(ts), btf_(nullptr) {
+  ifindex_ = dev_name ? if_nametoindex(dev_name) : 0;
   initialize_rw_engine();
   LLVMInitializeBPFTarget();
   LLVMInitializeBPFTargetMC();
@@ -258,7 +262,7 @@ void BPFModule::load_btf(sec_map_def &sections) {
   remapped_sources["/virtual/main.c"] = mod_src_;
   remapped_sources["/virtual/include/bcc/helpers.h"] = helpers_h->second;
 
-  BTF *btf = new BTF(flags_ & DEBUG_BTF);
+  BTF *btf = new BTF(flags_ & DEBUG_BTF, sections);
   int ret = btf->load(btf_sec, btf_sec_size, btf_ext_sec, btf_ext_sec_size,
                        remapped_sources);
   if (ret) {
@@ -266,6 +270,88 @@ void BPFModule::load_btf(sec_map_def &sections) {
     return;
   }
   btf_ = btf;
+}
+
+int BPFModule::create_maps(std::map<std::string, std::pair<int, int>> &map_tids,
+                           std::map<int, int> &map_fds,
+                           std::map<std::string, int> &inner_map_fds,
+                           bool for_inner_map) {
+  std::set<std::string> inner_maps;
+  if (for_inner_map) {
+    for (auto map : fake_fd_map_) {
+      std::string inner_map_name = get<7>(map.second);
+      if (inner_map_name.size())
+        inner_maps.insert(inner_map_name);
+    }
+  }
+
+  for (auto map : fake_fd_map_) {
+    int fd, fake_fd, map_type, key_size, value_size, max_entries, map_flags;
+    const char *map_name;
+    unsigned int pinned_id;
+    std::string inner_map_name;
+    int inner_map_fd = 0;
+
+    fake_fd     = map.first;
+    map_type    = get<0>(map.second);
+    map_name    = get<1>(map.second).c_str();
+    key_size    = get<2>(map.second);
+    value_size  = get<3>(map.second);
+    max_entries = get<4>(map.second);
+    map_flags   = get<5>(map.second);
+    pinned_id   = get<6>(map.second);
+    inner_map_name = get<7>(map.second);
+
+    if (for_inner_map) {
+      if (inner_maps.find(map_name) == inner_maps.end())
+        continue;
+      if (inner_map_name.size()) {
+        fprintf(stderr, "inner map %s has inner map %s\n",
+                map_name, inner_map_name.c_str());
+        return -1;
+      }
+    } else {
+      if (inner_map_fds.find(map_name) != inner_map_fds.end())
+        continue;
+      if (inner_map_name.size())
+        inner_map_fd = inner_map_fds[inner_map_name];
+    }
+
+    if (pinned_id) {
+        fd = bpf_map_get_fd_by_id(pinned_id);
+    } else {
+        struct bpf_create_map_attr attr = {};
+        attr.map_type = (enum bpf_map_type)map_type;
+        attr.name = map_name;
+        attr.key_size = key_size;
+        attr.value_size = value_size;
+        attr.max_entries = max_entries;
+        attr.map_flags = map_flags;
+        attr.map_ifindex = ifindex_;
+        attr.inner_map_fd = inner_map_fd;
+
+        if (map_tids.find(map_name) != map_tids.end()) {
+          attr.btf_fd = btf_->get_fd();
+          attr.btf_key_type_id = map_tids[map_name].first;
+          attr.btf_value_type_id = map_tids[map_name].second;
+        }
+
+        fd = bcc_create_map_xattr(&attr, allow_rlimit_);
+    }
+
+    if (fd < 0) {
+      fprintf(stderr, "could not open bpf map: %s, error: %s\n",
+              map_name, strerror(errno));
+      return -1;
+    }
+
+    if (for_inner_map)
+      inner_map_fds[map_name] = fd;
+
+    map_fds[fake_fd] = fd;
+  }
+
+  return 0;
 }
 
 int BPFModule::load_maps(sec_map_def &sections) {
@@ -313,42 +399,12 @@ int BPFModule::load_maps(sec_map_def &sections) {
   }
 
   // create maps
+  std::map<std::string, int> inner_map_fds;
   std::map<int, int> map_fds;
-  for (auto map : fake_fd_map_) {
-    int fd, fake_fd, map_type, key_size, value_size, max_entries, map_flags;
-    const char *map_name;
-
-    fake_fd     = map.first;
-    map_type    = get<0>(map.second);
-    map_name    = get<1>(map.second).c_str();
-    key_size    = get<2>(map.second);
-    value_size  = get<3>(map.second);
-    max_entries = get<4>(map.second);
-    map_flags   = get<5>(map.second);
-
-    struct bpf_create_map_attr attr = {};
-    attr.map_type = (enum bpf_map_type)map_type;
-    attr.name = map_name;
-    attr.key_size = key_size;
-    attr.value_size = value_size;
-    attr.max_entries = max_entries;
-    attr.map_flags = map_flags;
-
-    if (map_tids.find(map_name) != map_tids.end()) {
-      attr.btf_fd = btf_->get_fd();
-      attr.btf_key_type_id = map_tids[map_name].first;
-      attr.btf_value_type_id = map_tids[map_name].second;
-    }
-
-    fd = bcc_create_map_xattr(&attr, allow_rlimit_);
-    if (fd < 0) {
-      fprintf(stderr, "could not open bpf map: %s, error: %s\n",
-              map_name, strerror(errno));
-      return -1;
-    }
-
-    map_fds[fake_fd] = fd;
-  }
+  if (create_maps(map_tids, map_fds, inner_map_fds, true) < 0)
+    return -1;
+  if (create_maps(map_tids, map_fds, inner_map_fds, false) < 0)
+    return -1;
 
   // update map table fd's
   for (auto it = ts_->begin(), up = ts_->end(); it != up; ++it) {
@@ -390,10 +446,18 @@ int BPFModule::finalize() {
       *sections_p;
 
   mod->setTargetTriple("bpf-pc-linux");
+#if LLVM_MAJOR_VERSION >= 11
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+  mod->setDataLayout("e-m:e-p:64:64-i64:64-i128:128-n32:64-S128");
+#else
+  mod->setDataLayout("E-m:e-p:64:64-i64:64-i128:128-n32:64-S128");
+#endif
+#else
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
   mod->setDataLayout("e-m:e-p:64:64-i64:64-n32:64-S128");
 #else
   mod->setDataLayout("E-m:e-p:64:64-i64:64-n32:64-S128");
+#endif
 #endif
   sections_p = rw_engine_enabled_ ? &sections_ : &tmp_sections;
 
@@ -840,7 +904,8 @@ int BPFModule::load_string(const string &text, const char *cflags[], int ncflags
 int BPFModule::bcc_func_load(int prog_type, const char *name,
                 const struct bpf_insn *insns, int prog_len,
                 const char *license, unsigned kern_version,
-                int log_level, char *log_buf, unsigned log_buf_size) {
+                int log_level, char *log_buf, unsigned log_buf_size,
+                const char *dev_name) {
   struct bpf_load_program_attr attr = {};
   unsigned func_info_cnt, line_info_cnt, finfo_rec_size, linfo_rec_size;
   void *func_info = NULL, *line_info = NULL;
@@ -850,8 +915,13 @@ int BPFModule::bcc_func_load(int prog_type, const char *name,
   attr.name = name;
   attr.insns = insns;
   attr.license = license;
-  attr.kern_version = kern_version;
+  if (attr.prog_type != BPF_PROG_TYPE_TRACING &&
+      attr.prog_type != BPF_PROG_TYPE_EXT) {
+    attr.kern_version = kern_version;
+  }
   attr.log_level = log_level;
+  if (dev_name)
+    attr.prog_ifindex = if_nametoindex(dev_name);
 
   if (btf_) {
     int btf_fd = btf_->get_fd();
@@ -879,6 +949,18 @@ int BPFModule::bcc_func_load(int prog_type, const char *name,
   }
 
   return ret;
+}
+
+int BPFModule::bcc_func_attach(int prog_fd, int attachable_fd,
+                               int attach_type, unsigned int flags) {
+  return bpf_prog_attach(prog_fd, attachable_fd,
+                         (enum bpf_attach_type)attach_type, flags);
+}
+
+int BPFModule::bcc_func_detach(int prog_fd, int attachable_fd,
+                               int attach_type) {
+  return bpf_prog_detach2(prog_fd, attachable_fd,
+                          (enum bpf_attach_type)attach_type);
 }
 
 } // namespace ebpf
