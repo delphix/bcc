@@ -29,11 +29,12 @@ static struct env {
 static volatile __u64 start_ts;
 
 const char *argp_program_version = "biosnoop 0.1";
-const char *argp_program_bug_address = "<bpf@vger.kernel.org>";
+const char *argp_program_bug_address =
+	"https://github.com/iovisor/bcc/tree/master/libbpf-tools";
 const char argp_program_doc[] =
 "Trace block I/O.\n"
 "\n"
-"USAGE: biosnoop [--help] [-d] [-Q]\n"
+"USAGE: biosnoop [--help] [-d DISK] [-Q]\n"
 "\n"
 "EXAMPLES:\n"
 "    biosnoop              # trace all block I/O\n"
@@ -190,7 +191,7 @@ int main(int argc, char **argv)
 
 	obj = biosnoop_bpf__open();
 	if (!obj) {
-		fprintf(stderr, "failed to open and/or load BPF ojbect\n");
+		fprintf(stderr, "failed to open BPF object\n");
 		return 1;
 	}
 

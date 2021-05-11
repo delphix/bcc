@@ -27,7 +27,8 @@ static struct env {
 } env = { };
 
 const char *argp_program_version = "drsnoop 0.1";
-const char *argp_program_bug_address = "<bpf@vger.kernel.org>";
+const char *argp_program_bug_address =
+	"https://github.com/iovisor/bcc/tree/master/libbpf-tools";
 const char argp_program_doc[] =
 "Trace direct reclaim latency.\n"
 "\n"
@@ -156,7 +157,7 @@ int main(int argc, char **argv)
 
 	obj = drsnoop_bpf__open();
 	if (!obj) {
-		fprintf(stderr, "failed to open and/or load BPF object\n");
+		fprintf(stderr, "failed to open BPF object\n");
 		return 1;
 	}
 

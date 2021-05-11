@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (c) 2020 Wenbo Zhang
-#include "vmlinux.h"
+#include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_tracing.h>
@@ -10,6 +10,8 @@
 
 const volatile bool targ_queued = false;
 const volatile dev_t targ_dev = -1;
+
+extern __u32 LINUX_KERNEL_VERSION __kconfig;
 
 struct piddata {
 	char comm[TASK_COMM_LEN];
@@ -93,15 +95,31 @@ int trace_rq_start(struct request *rq, bool insert)
 }
 
 SEC("tp_btf/block_rq_insert")
-int BPF_PROG(block_rq_insert, struct request_queue *q, struct request *rq)
+int BPF_PROG(block_rq_insert)
 {
-	return trace_rq_start(rq, true);
+	/**
+	 * commit a54895fa (v5.11-rc1) changed tracepoint argument list
+	 * from TP_PROTO(struct request_queue *q, struct request *rq)
+	 * to TP_PROTO(struct request *rq)
+	 */
+	if (LINUX_KERNEL_VERSION > KERNEL_VERSION(5, 10, 0))
+		return trace_rq_start((void *)ctx[0], true);
+	else
+		return trace_rq_start((void *)ctx[1], true);
 }
 
 SEC("tp_btf/block_rq_issue")
-int BPF_PROG(block_rq_issue, struct request_queue *q, struct request *rq)
+int BPF_PROG(block_rq_issue)
 {
-	return trace_rq_start(rq, false);
+	/**
+	 * commit a54895fa (v5.11-rc1) changed tracepoint argument list
+	 * from TP_PROTO(struct request_queue *q, struct request *rq)
+	 * to TP_PROTO(struct request *rq)
+	 */
+	if (LINUX_KERNEL_VERSION > KERNEL_VERSION(5, 10, 0))
+		return trace_rq_start((void *)ctx[0], false);
+	else
+		return trace_rq_start((void *)ctx[1], false);
 }
 
 SEC("tp_btf/block_rq_complete")

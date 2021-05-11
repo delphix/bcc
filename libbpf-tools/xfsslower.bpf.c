@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (c) 2020 Wenbo Zhang
-#include "vmlinux.h"
+#include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_tracing.h>
 #include "xfsslower.h"
-
-#define NULL	0
 
 const volatile pid_t targ_tgid = 0;
 const volatile __u64 min_lat = 0;

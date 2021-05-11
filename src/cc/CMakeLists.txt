@@ -9,9 +9,16 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/frontends/b)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/frontends/clang)
 include_directories(${LLVM_INCLUDE_DIRS})
 include_directories(${LIBELF_INCLUDE_DIRS})
+if (LIBDEBUGINFOD_FOUND)
+  include_directories(${LIBDEBUGINFOD_INCLUDE_DIRS})
+endif (LIBDEBUGINFOD_FOUND)
 # todo: if check for kernel version
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/libbpf/include)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/libbpf/include/uapi)
+if (CMAKE_USE_LIBBPF_PACKAGE AND LIBBPF_FOUND)
+  include_directories(${LIBBPF_INCLUDE_DIRS})
+else()
+  include_directories(${CMAKE_CURRENT_SOURCE_DIR}/libbpf/include)
+  include_directories(${CMAKE_CURRENT_SOURCE_DIR}/libbpf/include/uapi)
+endif()
 
 # add_definitions has a problem parsing "-D_GLIBCXX_USE_CXX11_ABI=0", this is safer
 separate_arguments(LLVM_DEFINITIONS)
@@ -41,21 +48,26 @@ if(LIBBPF_INCLUDE_DIR)
   add_definitions(-DHAVE_EXTERNAL_LIBBPF)
 endif()
 
-if(LIBBPF_FOUND)
-  set(extract_dir ${CMAKE_CURRENT_BINARY_DIR}/libbpf_a_extract)
-  execute_process(COMMAND sh -c "mkdir -p ${extract_dir} && cd ${extract_dir} && ${CMAKE_AR} x ${LIBBPF_STATIC_LIBRARIES}")
-  file(GLOB libbpf_sources "${extract_dir}/*.o")
-else()
-  file(GLOB libbpf_sources "libbpf/src/*.c")
-endif()
+if(NOT CMAKE_USE_LIBBPF_PACKAGE)
+  if(LIBBPF_FOUND)
+    set(extract_dir ${CMAKE_CURRENT_BINARY_DIR}/libbpf_a_extract)
+    execute_process(COMMAND sh -c "mkdir -p ${extract_dir} && cd ${extract_dir} && ${CMAKE_AR} x ${LIBBPF_STATIC_LIBRARIES}")
+    file(GLOB libbpf_sources "${extract_dir}/*.o")
+  else()
+    file(GLOB libbpf_sources "libbpf/src/*.c")
+  endif()
 
-set(libbpf_uapi libbpf/include/uapi/linux/)
+  set(libbpf_uapi libbpf/include/uapi/linux/)
+endif()
 
 add_library(bpf-static STATIC libbpf.c perf_reader.c ${libbpf_sources})
 set_target_properties(bpf-static PROPERTIES OUTPUT_NAME bcc_bpf)
 add_library(bpf-shared SHARED libbpf.c perf_reader.c ${libbpf_sources})
 set_target_properties(bpf-shared PROPERTIES VERSION ${REVISION_LAST} SOVERSION 0)
 set_target_properties(bpf-shared PROPERTIES OUTPUT_NAME bcc_bpf)
+if(CMAKE_USE_LIBBPF_PACKAGE AND LIBBPF_FOUND)
+  target_link_libraries(bpf-shared ${LIBBPF_LIBRARIES})
+endif()
 
 set(bcc_common_sources bcc_common.cc bpf_module.cc bcc_btf.cc exported_files.cc)
 if (${LLVM_PACKAGE_VERSION} VERSION_EQUAL 6 OR ${LLVM_PACKAGE_VERSION} VERSION_GREATER 6)
@@ -74,6 +86,9 @@ set(bcc_sym_sources bcc_syms.cc bcc_elf.c bcc_perf_map.c bcc_proc.c)
 set(bcc_common_headers libbpf.h perf_reader.h "${CMAKE_CURRENT_BINARY_DIR}/bcc_version.h")
 set(bcc_table_headers file_desc.h table_desc.h table_storage.h)
 set(bcc_api_headers bcc_common.h bpf_module.h bcc_exception.h bcc_syms.h bcc_proc.h bcc_elf.h)
+if(LIBBPF_FOUND)
+  set(bcc_common_sources ${bcc_common_sources} libbpf.c perf_reader.c)
+endif()
 
 if(ENABLE_CLANG_JIT)
 add_library(bcc-shared SHARED
@@ -81,16 +96,6 @@ add_library(bcc-shared SHARED
   ${bcc_util_sources})
 set_target_properties(bcc-shared PROPERTIES VERSION ${REVISION_LAST} SOVERSION 0)
 set_target_properties(bcc-shared PROPERTIES OUTPUT_NAME bcc)
-
-# If there's libbpf detected we build the libbcc-no-libbpf.so library, that
-# dynamicaly links libbpf.so, in comparison to static link in libbcc.so.
-if(LIBBPF_FOUND)
-  add_library(bcc-shared-no-libbpf SHARED
-    link_all.cc ${bcc_common_sources} ${bcc_table_sources} ${bcc_sym_sources}
-    ${bcc_util_sources} libbpf.c perf_reader.c)
-  set_target_properties(bcc-shared-no-libbpf PROPERTIES VERSION ${REVISION_LAST} SOVERSION 0)
-  set_target_properties(bcc-shared-no-libbpf PROPERTIES OUTPUT_NAME bcc-no-libbpf)
-endif()
 
 if(ENABLE_USDT)
   set(bcc_usdt_sources usdt/usdt.cc usdt/usdt_args.cc)
@@ -114,18 +119,28 @@ set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${llvm_lib_exclude_f
 set(bcc_common_libs b_frontend clang_frontend
   -Wl,--whole-archive ${clang_libs} ${llvm_libs} -Wl,--no-whole-archive
   ${LIBELF_LIBRARIES})
-set(bcc_common_libs_for_a ${bcc_common_libs} bpf-static)
-set(bcc_common_libs_for_s ${bcc_common_libs} bpf-static)
-set(bcc_common_libs_for_n ${bcc_common_libs})
-set(bcc_common_libs_for_lua b_frontend clang_frontend bpf-static
+if (LIBDEBUGINFOD_FOUND)
+  list(APPEND bcc_common_libs ${LIBDEBUGINFOD_LIBRARIES})
+endif (LIBDEBUGINFOD_FOUND)
+set(bcc_common_libs_for_a ${bcc_common_libs})
+set(bcc_common_libs_for_s ${bcc_common_libs})
+set(bcc_common_libs_for_lua b_frontend clang_frontend
   ${clang_libs} ${llvm_libs} ${LIBELF_LIBRARIES})
+if(LIBBPF_FOUND)
+  list(APPEND bcc_common_libs_for_a ${LIBBPF_LIBRARIES})
+  list(APPEND bcc_common_libs_for_s ${LIBBPF_LIBRARIES})
+  list(APPEND bcc_common_libs_for_lua ${LIBBPF_LIBRARIES})
+else()
+  list(APPEND bcc_common_libs_for_a bpf-static)
+  list(APPEND bcc_common_libs_for_s bpf-static)
+  list(APPEND bcc_common_libs_for_lua bpf-static)
+endif()
 
 if(ENABLE_CPP_API)
   add_subdirectory(api)
   list(APPEND bcc_common_libs_for_a api-static)
   # Keep all API functions
   list(APPEND bcc_common_libs_for_s -Wl,--whole-archive api-static -Wl,--no-whole-archive)
-  list(APPEND bcc_common_libs_for_n -Wl,--whole-archive api-static -Wl,--no-whole-archive)
 endif()
 
 if(ENABLE_USDT)
@@ -133,7 +148,6 @@ if(ENABLE_USDT)
   add_subdirectory(usdt)
   list(APPEND bcc_common_libs_for_a usdt-static)
   list(APPEND bcc_common_libs_for_s usdt-static)
-  list(APPEND bcc_common_libs_for_n usdt-static)
   list(APPEND bcc_common_libs_for_lua usdt-static)
 endif()
 
@@ -143,11 +157,6 @@ add_subdirectory(frontends)
 target_link_libraries(bcc-shared ${bcc_common_libs_for_s})
 target_link_libraries(bcc-static ${bcc_common_libs_for_a} bcc-loader-static)
 set(bcc-lua-static ${bcc-lua-static} ${bcc_common_libs_for_lua})
-
-if(LIBBPF_FOUND)
-  target_link_libraries(bcc-shared-no-libbpf ${bcc_common_libs_for_n} ${LIBBPF_LIBRARIES})
-  install(TARGETS bcc-shared-no-libbpf LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
-endif()
 
 install(TARGETS bcc-shared bcc-static bcc-loader-static bpf-static LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES ${bcc_table_headers} DESTINATION include/bcc)

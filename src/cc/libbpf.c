@@ -38,11 +38,13 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <libgen.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 #include <linux/if_alg.h>
 
@@ -90,6 +92,12 @@
 #endif
 
 #define UNUSED(expr) do { (void)(expr); } while (0)
+
+#define PERF_UPROBE_REF_CTR_OFFSET_SHIFT 32
+
+#ifndef BPF_FS_MAGIC
+#define BPF_FS_MAGIC		0xcafe4a11
+#endif
 
 struct bpf_helper {
   char *name;
@@ -249,6 +257,19 @@ static struct bpf_helper helpers[] = {
   {"seq_printf_btf", "5.10"},
   {"skb_cgroup_classid", "5.10"},
   {"redirect_neigh", "5.10"},
+  {"per_cpu_ptr", "5.10"},
+  {"this_cpu_ptr", "5.10"},
+  {"redirect_peer", "5.10"},
+  {"task_storage_get", "5.11"},
+  {"task_storage_delete", "5.11"},
+  {"get_current_task_btf", "5.11"},
+  {"bprm_opts_set", "5.11"},
+  {"ktime_get_coarse_ns", "5.11"},
+  {"ima_inode_hash", "5.11"},
+  {"sock_from_file", "5.11"},
+  {"check_mtu", "5.12"},
+  {"for_each_map_elem", "5.13"},
+  {"snprintf", "5.13"},
 };
 
 static uint64_t ptr_to_u64(void *ptr)
@@ -342,6 +363,30 @@ int bpf_delete_elem(int fd, void *key)
 int bpf_lookup_and_delete(int fd, void *key, void *value)
 {
   return bpf_map_lookup_and_delete_elem(fd, key, value);
+}
+
+int bpf_lookup_batch(int fd, __u32 *in_batch, __u32 *out_batch, void *keys,
+                     void *values, __u32 *count)
+{
+  return bpf_map_lookup_batch(fd, in_batch, out_batch, keys, values, count,
+                              NULL);
+}
+
+int bpf_delete_batch(int fd,  void *keys, __u32 *count)
+{
+  return bpf_map_delete_batch(fd, keys, count, NULL);
+}
+
+int bpf_update_batch(int fd, void *keys, void *values, __u32 *count)
+{
+  return bpf_map_update_batch(fd, keys, values, count, NULL);
+}
+
+int bpf_lookup_and_delete_batch(int fd, __u32 *in_batch, __u32 *out_batch,
+                                void *keys, void *values, __u32 *count)
+{
+  return bpf_map_lookup_and_delete_batch(fd, in_batch, out_batch, keys, values,
+                                         count, NULL);
 }
 
 int bpf_get_first_key(int fd, void *key, size_t key_size)
@@ -589,6 +634,9 @@ int bcc_prog_load_xattr(struct bpf_load_program_attr *attr, int prog_len,
     else if (strncmp(attr->name, "kfunc__", 7) == 0) {
       name_offset = 7;
       expected_attach_type = BPF_TRACE_FENTRY;
+    } else if (strncmp(attr->name, "kmod_ret__", 10) == 0) {
+      name_offset = 10;
+      expected_attach_type = BPF_MODIFY_RETURN;
     } else if (strncmp(attr->name, "kretfunc__", 10) == 0) {
       name_offset = 10;
       expected_attach_type = BPF_TRACE_FEXIT;
@@ -838,7 +886,8 @@ static int bpf_get_retprobe_bit(const char *event_type)
  * the [k,u]probe. This function tries to create pfd with the perf_kprobe PMU.
  */
 static int bpf_try_perf_event_open_with_probe(const char *name, uint64_t offs,
-             int pid, const char *event_type, int is_return)
+             int pid, const char *event_type, int is_return,
+             uint64_t ref_ctr_offset)
 {
   struct perf_event_attr attr = {};
   int type = bpf_find_probe_type(event_type);
@@ -851,6 +900,7 @@ static int bpf_try_perf_event_open_with_probe(const char *name, uint64_t offs,
   attr.wakeup_events = 1;
   if (is_return)
     attr.config |= 1 << is_return_bit;
+  attr.config |= (ref_ctr_offset << PERF_UPROBE_REF_CTR_OFFSET_SHIFT);
 
   /*
    * struct perf_event_attr in latest perf_event.h has the following
@@ -1019,7 +1069,8 @@ error:
 // see bpf_try_perf_event_open_with_probe().
 static int bpf_attach_probe(int progfd, enum bpf_probe_attach_type attach_type,
                             const char *ev_name, const char *config1, const char* event_type,
-                            uint64_t offset, pid_t pid, int maxactive)
+                            uint64_t offset, pid_t pid, int maxactive,
+                            uint32_t ref_ctr_offset)
 {
   int kfd, pfd = -1;
   char buf[PATH_MAX], fname[256];
@@ -1028,7 +1079,8 @@ static int bpf_attach_probe(int progfd, enum bpf_probe_attach_type attach_type,
   if (maxactive <= 0)
     // Try create the [k,u]probe Perf Event with perf_event_open API.
     pfd = bpf_try_perf_event_open_with_probe(config1, offset, pid, event_type,
-                                             attach_type != BPF_PROBE_ENTRY);
+                                             attach_type != BPF_PROBE_ENTRY,
+                                             ref_ctr_offset);
 
   // If failed, most likely Kernel doesn't support the perf_kprobe PMU
   // (e12f03d "perf/core: Implement the 'perf_kprobe' PMU") yet.
@@ -1092,17 +1144,17 @@ int bpf_attach_kprobe(int progfd, enum bpf_probe_attach_type attach_type,
 {
   return bpf_attach_probe(progfd, attach_type,
                           ev_name, fn_name, "kprobe",
-                          fn_offset, -1, maxactive);
+                          fn_offset, -1, maxactive, 0);
 }
 
 int bpf_attach_uprobe(int progfd, enum bpf_probe_attach_type attach_type,
                       const char *ev_name, const char *binary_path,
-                      uint64_t offset, pid_t pid)
+                      uint64_t offset, pid_t pid, uint32_t ref_ctr_offset)
 {
 
   return bpf_attach_probe(progfd, attach_type,
                           ev_name, binary_path, "uprobe",
-                          offset, pid, -1);
+                          offset, pid, -1, ref_ctr_offset);
 }
 
 static int bpf_detach_probe(const char *ev_name, const char *event_type)
@@ -1480,4 +1532,50 @@ int bcc_iter_attach(int prog_fd, union bpf_iter_link_info *link_info,
 int bcc_iter_create(int link_fd)
 {
     return bpf_iter_create(link_fd);
+}
+
+int bcc_make_parent_dir(const char *path) {
+  int   err = 0;
+  char *dname, *dir;
+
+  dname = strdup(path);
+  if (dname == NULL)
+    return -ENOMEM;
+
+  dir = dirname(dname);
+  if (mkdir(dir, 0700) && errno != EEXIST)
+    err = -errno;
+
+  free(dname);
+  if (err)
+    fprintf(stderr, "failed to mkdir %s: %s\n", path, strerror(-err));
+
+  return err;
+}
+
+int bcc_check_bpffs_path(const char *path) {
+  struct statfs st_fs;
+  char  *dname, *dir;
+  int    err = 0;
+
+  if (path == NULL)
+    return -EINVAL;
+
+  dname = strdup(path);
+  if (dname == NULL)
+    return -ENOMEM;
+
+  dir = dirname(dname);
+  if (statfs(dir, &st_fs)) {
+    err = -errno;
+    fprintf(stderr, "failed to statfs %s: %s\n", path, strerror(-err));
+  }
+
+  free(dname);
+  if (!err && st_fs.f_type != BPF_FS_MAGIC) {
+    err = -EINVAL;
+    fprintf(stderr, "specified path %s is not on BPF FS\n", path);
+  }
+
+  return err;
 }

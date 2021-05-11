@@ -2,7 +2,7 @@
 
 * [Kernel Configuration](#kernel-configuration)
 * [Packages](#packages)
-  - [Debian](#debian--binary)
+  - [Debian](#debian---binary)
   - [Ubuntu](#ubuntu---binary)
   - [Fedora](#fedora---binary)
   - [Arch](#arch---binary)
@@ -20,6 +20,7 @@
   - [Centos](#centos---source)
   - [Amazon Linux](#amazon-linux---source)
   - [Alpine](#alpine---source)
+  - [Arch](#arch---source)
 * [Older Instructions](#older-instructions)
 
 ## Kernel Configuration
@@ -42,6 +43,8 @@ CONFIG_HAVE_BPF_JIT=y
 CONFIG_HAVE_EBPF_JIT=y
 # [optional, for kprobes]
 CONFIG_BPF_EVENTS=y
+# Need kernel headers through /sys/kernel/kheaders.tar.xz
+CONFIG_IKHEADERS=y
 ```
 
 There are a few optional kernel flags needed for running bcc networking examples on vanilla kernel:
@@ -280,87 +283,36 @@ To alleviate this problem, starting at release v0.11.0, source code with corresp
 libbpf submodule codes will be released as well. See https://github.com/iovisor/bcc/releases.
 
 ## Debian - Source
-### Jessie
+### sid
 #### Repositories
-
-The automated tests that run as part of the build process require `netperf`.  Since netperf's license is not "certified"
-as an open-source license, it is in Debian's `non-free` repository.
 
 `/etc/apt/sources.list` should include the `non-free` repository and look something like this:
 
 ```
-deb http://httpredir.debian.org/debian/ jessie main non-free
-deb-src http://httpredir.debian.org/debian/ jessie main non-free
-
-deb http://security.debian.org/ jessie/updates main non-free
-deb-src http://security.debian.org/ jessie/updates main non-free
-
-# wheezy-updates, previously known as 'volatile'
-deb http://ftp.us.debian.org/debian/ jessie-updates main non-free
-deb-src http://ftp.us.debian.org/debian/ jessie-updates main non-free
-```
-
-BCC also requires kernel version 4.1 or above.  Those kernels are available in the `jessie-backports` repository.  To
-add the `jessie-backports` repository to your system create the file `/etc/apt/sources.list.d/jessie-backports.list`
-with the following contents:
-
-```
-deb http://httpredir.debian.org/debian jessie-backports main
-deb-src http://httpredir.debian.org/debian jessie-backports main
+deb http://deb.debian.org/debian sid main contrib non-free
+deb-src http://deb.debian.org/debian sid main contrib non-free
 ```
 
 #### Install Build Dependencies
-
-Note, check for the latest `linux-image-4.x` version in `jessie-backports` before proceeding.  Also, have a look at the
-`Build-Depends:` section in `debian/control` file.
-
 ```
 # Before you begin
 apt-get update
-
-# Update kernel and linux-base package
-apt-get -t jessie-backports install linux-base linux-image-4.9.0-0.bpo.2-amd64 linux-headers-4.9.0-0.bpo.2-amd64
-
+# According to https://packages.debian.org/source/sid/bpfcc,
 # BCC build dependencies:
-apt-get install debhelper cmake libllvm3.8 llvm-3.8-dev libclang-3.8-dev \
-  libelf-dev bison flex libedit-dev clang-format-3.8 python python-netaddr \
-  python-pyroute2 luajit libluajit-5.1-dev arping iperf netperf ethtool \
-  devscripts zlib1g-dev libfl-dev
+sudo apt-get install arping bison clang-format cmake dh-python \
+  dpkg-dev pkg-kde-tools ethtool flex inetutils-ping iperf \
+  libbpf-dev libclang-dev libclang-cpp-dev libedit-dev libelf-dev \
+  libfl-dev libzip-dev linux-libc-dev llvm-dev libluajit-5.1-dev \
+  luajit python3-netaddr python3-pyroute2 python3-distutils python3
 ```
 
-#### Sudo
-
-Adding eBPF probes to the kernel and removing probes from it requires root privileges.  For the build to complete
-successfully, you must build from an account with `sudo` access.  (You may also build as root, but it is bad style.)
-
-`/etc/sudoers` or `/etc/sudoers.d/build-user` should contain
-
+#### Install and compile BCC
 ```
-build-user ALL = (ALL) NOPASSWD: ALL
-```
-
-or
-
-```
-build-user ALL = (ALL) ALL
-```
-
-If using the latter sudoers configuration, please keep an eye out for sudo's password prompt while the build is running.
-
-#### Build
-
-```
-cd <preferred development directory>
 git clone https://github.com/iovisor/bcc.git
-cd bcc
-debuild -b -uc -us
-```
-
-#### Install
-
-```
-cd ..
-sudo dpkg -i *bcc*.deb
+mkdir bcc/build; cd bcc/build
+cmake ..
+make
+sudo make install
 ```
 
 ## Ubuntu - Source
@@ -383,11 +335,11 @@ sudo apt-get update
 
 # For Bionic (18.04 LTS)
 sudo apt-get -y install bison build-essential cmake flex git libedit-dev \
-  libllvm6.0 llvm-6.0-dev libclang-6.0-dev python zlib1g-dev libelf-dev
+  libllvm6.0 llvm-6.0-dev libclang-6.0-dev python zlib1g-dev libelf-dev libfl-dev
 
-# For Eoan (19.10)
+# For Eoan (19.10) or Focal (20.04.1 LTS)
 sudo apt install -y bison build-essential cmake flex git libedit-dev \
-  libllvm7 llvm-7-dev libclang-7-dev python zlib1g-dev libelf-dev
+  libllvm7 llvm-7-dev libclang-7-dev python zlib1g-dev libelf-dev libfl-dev
 
 # For other versions
 sudo apt-get -y install bison build-essential cmake flex git libedit-dev \
@@ -419,7 +371,7 @@ popd
 ```
 sudo dnf install -y bison cmake ethtool flex git iperf libstdc++-static \
   python-netaddr python-pip gcc gcc-c++ make zlib-devel \
-  elfutils-libelf-devel
+  elfutils-libelf-devel python-cachetools
 sudo dnf install -y luajit luajit-devel  # for Lua support
 sudo dnf install -y \
   http://repo.iovisor.org/yum/extra/mageia/cauldron/x86_64/netperf-2.7.0-1.mga6.x86_64.rpm
@@ -548,7 +500,7 @@ Tested on Amazon Linux AMI release 2018.03 (kernel 4.14.47-56.37.amzn1.x86_64)
 # enable epel to get iperf, luajit, luajit-devel, cmake3 (cmake3 is required to support c++11)
 sudo yum-config-manager --enable epel
 
-sudo yum install -y bison cmake3 ethtool flex git iperf libstdc++-static python-netaddr gcc gcc-c++ make zlib-devel elfutils-libelf-devel
+sudo yum install -y bison cmake3 ethtool flex git iperf libstdc++-static python-netaddr python-cachetools gcc gcc-c++ make zlib-devel elfutils-libelf-devel
 sudo yum install -y luajit luajit-devel
 sudo yum install -y http://repo.iovisor.org/yum/extra/mageia/cauldron/x86_64/netperf-2.7.0-1.mga6.x86_64.rpm
 sudo pip install pyroute2
@@ -590,7 +542,7 @@ sudo /usr/share/bcc/tools/execsnoop
 # enable epel to get iperf, luajit, luajit-devel, cmake3 (cmake3 is required to support c++11)
 sudo yum-config-manager --enable epel
 
-sudo yum install -y bison cmake3 ethtool flex git iperf libstdc++-static python-netaddr gcc gcc-c++ make zlib-devel elfutils-libelf-devel
+sudo yum install -y bison cmake3 ethtool flex git iperf libstdc++-static python-netaddr python-cachetools gcc gcc-c++ make zlib-devel elfutils-libelf-devel
 sudo yum install -y luajit luajit-devel
 sudo yum install -y http://repo.iovisor.org/yum/extra/mageia/cauldron/x86_64/netperf-2.7.0-1.mga6.x86_64.rpm
 sudo pip install pyroute2
@@ -651,6 +603,30 @@ ln -s $(which python3) /usr/bin/python
 
 ```
 sudo /usr/share/bcc/tools/execsnoop
+```
+
+## Arch - Source
+
+### Install dependencies
+
+```
+pacman -S cmake clang llvm flex bison python
+```
+
+### Build bcc
+
+```
+git clone https://github.com/iovisor/bcc.git
+pushd .
+mkdir bcc/build
+cd bcc/build
+cmake .. -DPYTHON_CMD=python3 # for python3 support
+make -j$(nproc)
+sudo make install
+cd src/python
+make -j$(nproc)
+sudo make install
+popd
 ```
 
 # Older Instructions

@@ -195,6 +195,15 @@ int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts,
                                    "-fno-asynchronous-unwind-tables",
                                    "-x", "c", "-c", abs_file.c_str()});
 
+  const char *arch = getenv("ARCH");
+  if (!arch)
+    arch = un.machine;
+
+  if (!strncmp(arch, "mips", 4)) {
+    flags_cstr.push_back("-D__MIPSEL__");
+    flags_cstr.push_back("-D_MIPS_SZLONG=64");
+  }
+
   KBuildHelper kbuild_helper(kpath_env ? kpath : kdir, has_kpath_source);
 
   vector<string> kflags;
@@ -253,7 +262,7 @@ int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts,
   return 0;
 }
 
-void *get_clang_target_cb(bcc_arch_t arch)
+void *get_clang_target_cb(bcc_arch_t arch, bool for_syscall)
 {
   const char *ret;
 
@@ -269,6 +278,9 @@ void *get_clang_target_cb(bcc_arch_t arch)
       break;
     case BCC_ARCH_ARM64:
       ret = "aarch64-unknown-linux-gnu";
+      break;
+    case BCC_ARCH_MIPS:
+      ret = "mips64el-unknown-linux-gnuabi64";
       break;
     default:
       ret = "x86_64-unknown-linux-gnu";
@@ -302,6 +314,8 @@ int ClangLoader::do_compile(unique_ptr<llvm::Module> *mod, TableStorage &ts,
     flags_cstr.push_back("-include");
     flags_cstr.push_back("/virtual/include/bcc/bpf.h");
   }
+  flags_cstr.push_back("-include");
+  flags_cstr.push_back("/virtual/include/bcc/bpf_workaround.h");
   flags_cstr.insert(flags_cstr.end(), flags_cstr_rem.begin(),
                     flags_cstr_rem.end());
 
@@ -318,7 +332,7 @@ int ClangLoader::do_compile(unique_ptr<llvm::Module> *mod, TableStorage &ts,
   driver::Driver drv("", target_triple, diags);
 
 #if LLVM_MAJOR_VERSION >= 4
-  if (target_triple == "x86_64-unknown-linux-gnu")
+  if (target_triple == "x86_64-unknown-linux-gnu" || target_triple == "aarch64-unknown-linux-gnu")
     flags_cstr.push_back("-fno-jump-tables");
 #endif
 
