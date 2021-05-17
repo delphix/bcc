@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (c) 2020 Wenbo Zhang
-#include "vmlinux.h"
+#include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_tracing.h>
@@ -9,7 +9,6 @@
 #include "maps.bpf.h"
 
 #define MAX_ENTRIES	10240
-#define NULL		0
 
 const volatile bool targ_ms = false;
 const volatile dev_t targ_dev = -1;

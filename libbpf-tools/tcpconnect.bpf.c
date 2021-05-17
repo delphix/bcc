@@ -2,7 +2,7 @@
 // Copyright (c) 2020 Anton Protopopov
 //
 // Based on tcpconnect(8) from BCC by Brendan Gregg
-#include "vmlinux.h"
+#include <vmlinux.h>
 
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_core_read.h>
@@ -53,10 +53,12 @@ struct {
 
 static __always_inline bool filter_port(__u16 port)
 {
+	int i;
+
 	if (filter_ports_len == 0)
 		return false;
 
-	for (int i = 0; i < filter_ports_len; i++) {
+	for (i = 0; i < filter_ports_len; i++) {
 		if (port == filter_ports[i])
 			return false;
 	}

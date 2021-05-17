@@ -255,6 +255,25 @@ struct _name##_table_t _name = { .max_entries = (_max_entries) }
 #define BPF_HASH(...) \
   BPF_HASHX(__VA_ARGS__, BPF_HASH4, BPF_HASH3, BPF_HASH2, BPF_HASH1)(__VA_ARGS__)
 
+#define BPF_PERCPU_HASH1(_name) \
+  BPF_TABLE("percpu_hash", u64, u64, _name, 10240)
+#define BPF_PERCPU_HASH2(_name, _key_type) \
+  BPF_TABLE("percpu_hash", _key_type, u64, _name, 10240)
+#define BPF_PERCPU_HASH3(_name, _key_type, _leaf_type) \
+  BPF_TABLE("percpu_hash", _key_type, _leaf_type, _name, 10240)
+#define BPF_PERCPU_HASH4(_name, _key_type, _leaf_type, _size) \
+  BPF_TABLE("percpu_hash", _key_type, _leaf_type, _name, _size)
+
+// helper for default-variable macro function
+#define BPF_PERCPU_HASHX(_1, _2, _3, _4, NAME, ...) NAME
+
+// Define a hash function, some arguments optional
+// BPF_PERCPU_HASH(name, key_type=u64, leaf_type=u64, size=10240)
+#define BPF_PERCPU_HASH(...)                                            \
+  BPF_PERCPU_HASHX(                                                     \
+    __VA_ARGS__, BPF_PERCPU_HASH4, BPF_PERCPU_HASH3, BPF_PERCPU_HASH2, BPF_PERCPU_HASH1) \
+           (__VA_ARGS__)
+
 #define BPF_ARRAY1(_name) \
   BPF_TABLE("array", int, u64, _name, 10240)
 #define BPF_ARRAY2(_name, _leaf_type) \
@@ -784,16 +803,49 @@ static long (*bpf_d_path)(struct path *path, char *buf, u32 sz) =
 static long (*bpf_copy_from_user)(void *dst, u32 size, const void *user_ptr) =
   (void *)BPF_FUNC_copy_from_user;
 
-static long (*bpf_snprintf_btf)(char *str, __u32 str_size, struct btf_ptr *ptr,
-				__u32 btf_ptr_size, __u64 flags) =
+static long (*bpf_snprintf_btf)(char *str, u32 str_size, struct btf_ptr *ptr,
+				u32 btf_ptr_size, u64 flags) =
   (void *)BPF_FUNC_snprintf_btf;
 static long (*bpf_seq_printf_btf)(struct seq_file *m, struct btf_ptr *ptr,
-				  __u32 ptr_size, __u64 flags) =
+				  u32 ptr_size, u64 flags) =
   (void *)BPF_FUNC_seq_printf_btf;
-static __u64 (*bpf_skb_cgroup_classid)(struct __sk_buff *skb) =
+static u64 (*bpf_skb_cgroup_classid)(struct sk_buff *skb) =
   (void *)BPF_FUNC_skb_cgroup_classid;
-static long (*bpf_redirect_neigh)(__u32 ifindex, __u64 flags) =
+static long (*bpf_redirect_neigh)(u32 ifindex, struct bpf_redir_neigh *params,
+				  u64 flags) =
   (void *)BPF_FUNC_redirect_neigh;
+static void * (*bpf_per_cpu_ptr)(const void *percpu_ptr, u32 cpu) =
+  (void *)BPF_FUNC_per_cpu_ptr;
+static void * (*bpf_this_cpu_ptr)(const void *percpu_ptr) =
+  (void *)BPF_FUNC_this_cpu_ptr;
+static long (*bpf_redirect_peer)(u32 ifindex, u64 flags) = (void *)BPF_FUNC_redirect_peer;
+
+static void *(*bpf_task_storage_get)(void *map, struct task_struct *task,
+				     void *value, __u64 flags) =
+  (void *)BPF_FUNC_task_storage_get;
+static long (*bpf_task_storage_delete)(void *map, struct task_struct *task) =
+  (void *)BPF_FUNC_task_storage_delete;
+static struct task_struct *(*bpf_get_current_task_btf)(void) =
+  (void *)BPF_FUNC_get_current_task_btf;
+struct linux_binprm;
+static long (*bpf_bprm_opts_set)(struct linux_binprm *bprm, __u64 flags) =
+  (void *)BPF_FUNC_bprm_opts_set;
+static __u64 (*bpf_ktime_get_coarse_ns)(void) = (void *)BPF_FUNC_ktime_get_coarse_ns;
+struct inode;
+static long (*bpf_ima_inode_hash)(struct inode *inode, void *dst, __u32 size) =
+  (void *)BPF_FUNC_ima_inode_hash;
+struct file;
+static struct socket *(*bpf_sock_from_file)(struct file *file) =
+  (void *)BPF_FUNC_sock_from_file;
+static long (*bpf_check_mtu)(void *ctx, __u32 ifindex, __u32 *mtu_len,
+                             __s32 len_diff, __u64 flags) =
+  (void *)BPF_FUNC_check_mtu;
+static long (*bpf_for_each_map_elem)(void *map, void *callback_fn,
+                                     void *callback_ctx, __u64 flags) =
+  (void *)BPF_FUNC_for_each_map_elem;
+static long (*bpf_snprintf)(char *str, __u32 str_size, const char *fmt,
+                            __u64 *data, __u32 data_len) =
+  (void *)BPF_FUNC_snprintf;
 
 /* llvm builtin functions that eBPF C program may use to
  * emit BPF_LD_ABS and BPF_LD_IND instructions
@@ -1050,6 +1102,9 @@ int bpf_usdt_readarg_p(int argc, struct pt_regs *ctx, void *buf, u64 len) asm("l
 #elif defined(__TARGET_ARCH_powerpc)
 #define bpf_target_powerpc
 #define bpf_target_defined
+#elif defined(__TARGET_ARCH_mips)
+#define bpf_target_mips
+#define bpf_target_defined
 #else
 #undef bpf_target_defined
 #endif
@@ -1064,6 +1119,8 @@ int bpf_usdt_readarg_p(int argc, struct pt_regs *ctx, void *buf, u64 len) asm("l
 #define bpf_target_arm64
 #elif defined(__powerpc__)
 #define bpf_target_powerpc
+#elif defined(__mips__)
+#define bpf_target_mips
 #endif
 #endif
 
@@ -1112,8 +1169,40 @@ int bpf_usdt_readarg_p(int argc, struct pt_regs *ctx, void *buf, u64 len) asm("l
 #define PT_REGS_RC(x)		((x)->regs[0])
 #define PT_REGS_SP(x)		((x)->sp)
 #define PT_REGS_IP(x)		((x)->pc)
+#elif defined(bpf_target_mips)
+#define PT_REGS_PARM1(x) ((x)->regs[4])
+#define PT_REGS_PARM2(x) ((x)->regs[5])
+#define PT_REGS_PARM3(x) ((x)->regs[6])
+#define PT_REGS_PARM4(x) ((x)->regs[7])
+#define PT_REGS_PARM5(x) ((x)->regs[8])
+#define PT_REGS_PARM6(x) ((x)->regs[9])
+#define PT_REGS_RET(x) ((x)->regs[31])
+#define PT_REGS_FP(x) ((x)->regs[30]) /* Works only with CONFIG_FRAME_POINTER */
+#define PT_REGS_RC(x) ((x)->regs[2])
+#define PT_REGS_SP(x) ((x)->regs[29])
+#define PT_REGS_IP(x) ((x)->cp0_epc)
 #else
 #error "bcc does not support this platform yet"
+#endif
+
+#if defined(CONFIG_ARCH_HAS_SYSCALL_WRAPPER) && !defined(__s390x__)
+#define PT_REGS_SYSCALL_CTX(ctx)	((struct pt_regs *)PT_REGS_PARM1(ctx))
+#else
+#define PT_REGS_SYSCALL_CTX(ctx)	(ctx)
+#endif
+/* Helpers for syscall params. Pass in a ctx returned from PT_REGS_SYSCALL_CTX.
+ */
+#define PT_REGS_PARM1_SYSCALL(ctx)	PT_REGS_PARM1(ctx)
+#define PT_REGS_PARM2_SYSCALL(ctx)	PT_REGS_PARM2(ctx)
+#define PT_REGS_PARM3_SYSCALL(ctx)	PT_REGS_PARM3(ctx)
+#if defined(bpf_target_x86)
+#define PT_REGS_PARM4_SYSCALL(ctx)	((ctx)->r10) /* for syscall only */
+#else
+#define PT_REGS_PARM4_SYSCALL(ctx)	PT_REGS_PARM4(ctx)
+#endif
+#define PT_REGS_PARM5_SYSCALL(ctx)	PT_REGS_PARM5(ctx)
+#ifdef PT_REGS_PARM6
+#define PT_REGS_PARM6_SYSCALL(ctx)	PT_REGS_PARM6(ctx)
 #endif
 
 #define lock_xadd(ptr, val) ((void)__sync_fetch_and_add(ptr, val))
@@ -1170,6 +1259,9 @@ static int ____##name(unsigned long long *ctx, ##args)
 
 #define KRETFUNC_PROBE(event, args...) \
         BPF_PROG(kretfunc__ ## event, args)
+
+#define KMOD_RET(event, args...) \
+        BPF_PROG(kmod_ret__ ## event, args)
 
 #define LSM_PROBE(event, args...) \
         BPF_PROG(lsm__ ## event, args)

@@ -45,6 +45,9 @@ constexpr int MAX_CALLING_CONV_REGS = 6;
 const char *calling_conv_regs_x86[] = {
   "di", "si", "dx", "cx", "r8", "r9"
 };
+const char *calling_conv_syscall_regs_x86[] = {
+  "di", "si", "dx", "r10", "r8", "r9"
+};
 const char *calling_conv_regs_ppc[] = {"gpr[3]", "gpr[4]", "gpr[5]",
                                        "gpr[6]", "gpr[7]", "gpr[8]"};
 
@@ -54,7 +57,10 @@ const char *calling_conv_regs_s390x[] = {"gprs[2]", "gprs[3]", "gprs[4]",
 const char *calling_conv_regs_arm64[] = {"regs[0]", "regs[1]", "regs[2]",
                                        "regs[3]", "regs[4]", "regs[5]"};
 
-void *get_call_conv_cb(bcc_arch_t arch)
+const char *calling_conv_regs_mips[] = {"regs[4]", "regs[5]", "regs[6]",
+                                       "regs[7]", "regs[8]", "regs[9]"};
+
+void *get_call_conv_cb(bcc_arch_t arch, bool for_syscall)
 {
   const char **ret;
 
@@ -69,17 +75,23 @@ void *get_call_conv_cb(bcc_arch_t arch)
     case BCC_ARCH_ARM64:
       ret = calling_conv_regs_arm64;
       break;
+    case BCC_ARCH_MIPS:
+      ret = calling_conv_regs_mips;
+      break;
     default:
-      ret = calling_conv_regs_x86;
+      if (for_syscall)
+        ret = calling_conv_syscall_regs_x86;
+      else
+        ret = calling_conv_regs_x86;
   }
 
   return (void *)ret;
 }
 
-const char **get_call_conv(void) {
+const char **get_call_conv(bool for_syscall = false) {
   const char **ret;
 
-  ret = (const char **)run_arch_callback(get_call_conv_cb);
+  ret = (const char **)run_arch_callback(get_call_conv_cb, for_syscall);
   return ret;
 }
 
@@ -315,7 +327,7 @@ bool MapVisitor::VisitCallExpr(CallExpr *Call) {
 
 ProbeVisitor::ProbeVisitor(ASTContext &C, Rewriter &rewriter,
                            set<Decl *> &m, bool track_helpers) :
-  C(C), rewriter_(rewriter), m_(m), track_helpers_(track_helpers),
+  C(C), rewriter_(rewriter), m_(m), ctx_(nullptr), track_helpers_(track_helpers),
   addrof_stmt_(nullptr), is_addrof_(false) {
   const char **calling_conv_regs = get_call_conv();
   has_overlap_kuaddr_ = calling_conv_regs == calling_conv_regs_s390x;
@@ -760,17 +772,20 @@ void BTypeVisitor::genParamIndirectAssign(FunctionDecl *D, string& preamble,
 }
 
 void BTypeVisitor::rewriteFuncParam(FunctionDecl *D) {
-  const char **calling_conv_regs = get_call_conv();
-
   string preamble = "{\n";
   if (D->param_size() > 1) {
+    bool is_syscall = false;
+    if (strncmp(D->getName().str().c_str(), "syscall__", 9) == 0 ||
+        strncmp(D->getName().str().c_str(), "kprobe____x64_sys_", 18) == 0)
+      is_syscall = true;
+    const char **calling_conv_regs = get_call_conv(is_syscall);
+
     // If function prefix is "syscall__" or "kprobe____x64_sys_",
     // the function will attach to a kprobe syscall function.
     // Guard parameter assiggnment with CONFIG_ARCH_HAS_SYSCALL_WRAPPER.
     // For __x64_sys_* syscalls, this is always true, but we guard
     // it in case of "syscall__" for other architectures.
-    if (strncmp(D->getName().str().c_str(), "syscall__", 9) == 0 ||
-        strncmp(D->getName().str().c_str(), "kprobe____x64_sys_", 18) == 0) {
+    if (is_syscall) {
       preamble += "#if defined(CONFIG_ARCH_HAS_SYSCALL_WRAPPER) && !defined(__s390x__)\n";
       genParamIndirectAssign(D, preamble, calling_conv_regs);
       preamble += "\n#else\n";
@@ -919,8 +934,8 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
           // events.perf_submit(ctx, &data, sizeof(data));
           // ...
           //                       &data   ->     data    ->  typeof(data)        ->   data_t
-          auto type_arg1 = Call->getArg(1)->IgnoreCasts()->getType().getTypePtr()->getPointeeType().getTypePtr();
-          if (type_arg1->isStructureType()) {
+          auto type_arg1 = Call->getArg(1)->IgnoreCasts()->getType().getTypePtr()->getPointeeType().getTypePtrOrNull();
+          if (type_arg1 && type_arg1->isStructureType()) {
             auto event_type = type_arg1->getAsTagDecl();
             const auto *r = dyn_cast<RecordDecl>(event_type);
             std::vector<std::string> perf_event;
@@ -1377,24 +1392,36 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
       ++i;
     }
 
-    std::string section_attr = string(A->getName());
+    std::string section_attr = string(A->getName()), pinned;
     size_t pinned_path_pos = section_attr.find(":");
-    unsigned int pinned_id = 0; // 0 is not a valid map ID, they start with 1
+    // 0 is not a valid map ID, -1 is to create and pin it to file
+    int pinned_id = 0;
 
     if (pinned_path_pos != std::string::npos) {
-      std::string pinned = section_attr.substr(pinned_path_pos + 1);
+      pinned = section_attr.substr(pinned_path_pos + 1);
       section_attr = section_attr.substr(0, pinned_path_pos);
       int fd = bpf_obj_get(pinned.c_str());
-      struct bpf_map_info info = {};
-      unsigned int info_len = sizeof(info);
+      if (fd < 0) {
+        if (bcc_make_parent_dir(pinned.c_str()) ||
+            bcc_check_bpffs_path(pinned.c_str())) {
+          return false;
+        }
 
-      if (bpf_obj_get_info_by_fd(fd, &info, &info_len)) {
-        error(GET_BEGINLOC(Decl), "map not found: %0") << pinned;
-        return false;
+        pinned_id = -1;
+      } else {
+        struct bpf_map_info info = {};
+        unsigned int info_len = sizeof(info);
+
+        if (bpf_obj_get_info_by_fd(fd, &info, &info_len)) {
+          error(GET_BEGINLOC(Decl), "get map info failed: %0")
+                << strerror(errno);
+          return false;
+        }
+
+        pinned_id = info.id;
       }
 
       close(fd);
-      pinned_id = info.id;
     }
 
     // Additional map specific information
@@ -1520,7 +1547,7 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
       fe_.add_map_def(table.fake_fd, std::make_tuple((int)map_type, std::string(table.name),
                       (int)table.key_size, (int)table.leaf_size,
                       (int)table.max_entries, table.flags, pinned_id,
-                      inner_map_name));
+                      inner_map_name, pinned));
     }
 
     if (!table.is_extern)
@@ -1694,7 +1721,11 @@ void BFrontendAction::DoMiscWorkAround() {
     false);
 
   rewriter_->getEditBuffer(rewriter_->getSourceMgr().getMainFileID()).InsertTextAfter(
+#if LLVM_MAJOR_VERSION >= 12
+    rewriter_->getSourceMgr().getBufferOrFake(rewriter_->getSourceMgr().getMainFileID()).getBufferSize(),
+#else
     rewriter_->getSourceMgr().getBuffer(rewriter_->getSourceMgr().getMainFileID())->getBufferSize(),
+#endif
     "\n#include <bcc/footer.h>\n");
 }
 

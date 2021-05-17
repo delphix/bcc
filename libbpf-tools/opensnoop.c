@@ -44,7 +44,8 @@ static struct env {
 };
 
 const char *argp_program_version = "opensnoop 0.1";
-const char *argp_program_bug_address = "<bpf@vger.kernel.org>";
+const char *argp_program_bug_address =
+	"https://github.com/iovisor/bcc/tree/master/libbpf-tools";
 const char argp_program_doc[] =
 "Trace open family syscalls\n"
 "\n"
@@ -231,7 +232,7 @@ int main(int argc, char **argv)
 
 	obj = opensnoop_bpf__open();
 	if (!obj) {
-		fprintf(stderr, "failed to open and/or load BPF object\n");
+		fprintf(stderr, "failed to open BPF object\n");
 		return 1;
 	}
 
@@ -240,6 +241,16 @@ int main(int argc, char **argv)
 	obj->rodata->targ_pid = env.tid;
 	obj->rodata->targ_uid = env.uid;
 	obj->rodata->targ_failed = env.failed;
+
+#ifdef __aarch64__
+	/* aarch64 has no open syscall, only openat variants.
+	 * Disable associated tracepoints that do not exist. See #3344.
+	 */
+	bpf_program__set_autoload(
+		obj->progs.tracepoint__syscalls__sys_enter_open, false);
+	bpf_program__set_autoload(
+		obj->progs.tracepoint__syscalls__sys_exit_open, false);
+#endif
 
 	err = opensnoop_bpf__load(obj);
 	if (err) {

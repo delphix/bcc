@@ -31,7 +31,8 @@ struct env {
 static volatile bool exiting;
 
 const char *argp_program_version = "softirqs 0.1";
-const char *argp_program_bug_address = "<bpf@vger.kernel.org>";
+const char *argp_program_bug_address =
+	"https://github.com/iovisor/bcc/tree/master/libbpf-tools";
 const char argp_program_doc[] =
 "Summarize soft irq event time as histograms.\n"
 "\n"
@@ -201,7 +202,7 @@ int main(int argc, char **argv)
 
 	obj = softirqs_bpf__open();
 	if (!obj) {
-		fprintf(stderr, "failed to open and/or load BPF object\n");
+		fprintf(stderr, "failed to open BPF object\n");
 		return 1;
 	}
 
