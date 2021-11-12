@@ -86,7 +86,7 @@ int bpf_detach_kprobe(const char *ev_name);
 
 int bpf_attach_uprobe(int progfd, enum bpf_probe_attach_type attach_type,
                       const char *ev_name, const char *binary_path,
-                      uint64_t offset, pid_t pid);
+                      uint64_t offset, pid_t pid, uint32_t ref_ctr_offset);
 int bpf_detach_uprobe(const char *ev_name);
 
 int bpf_attach_tracepoint(int progfd, const char *tp_category,
@@ -100,6 +100,8 @@ int bpf_attach_kfunc(int prog_fd);
 int bpf_attach_lsm(int prog_fd);
 
 bool bpf_has_kernel_btf(void);
+
+int kernel_struct_has_field(const char *struct_name, const char *field_name);
 
 void * bpf_open_perf_buffer(perf_reader_raw_cb raw_cb,
                             perf_reader_lost_cb lost_cb, void *cb_cookie,
@@ -147,6 +149,8 @@ int bpf_obj_get_info_by_fd(int prog_fd, void *info, uint32_t *info_len);
 int bcc_iter_attach(int prog_fd, union bpf_iter_link_info *link_info,
                     uint32_t link_info_len);
 int bcc_iter_create(int link_fd);
+int bcc_make_parent_dir(const char *path);
+int bcc_check_bpffs_path(const char *path);
 
 #define LOG_BUF_SIZE 65536
 

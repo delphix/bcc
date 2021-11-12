@@ -63,6 +63,8 @@ add_test(NAME py_test_tracepoint WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   COMMAND ${TEST_WRAPPER} py_test_tracepoint sudo ${CMAKE_CURRENT_SOURCE_DIR}/test_tracepoint.py)
 add_test(NAME py_test_perf_event WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   COMMAND ${TEST_WRAPPER} py_test_perf_event sudo ${CMAKE_CURRENT_SOURCE_DIR}/test_perf_event.py)
+add_test(NAME py_test_attach_perf_event WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  COMMAND ${TEST_WRAPPER} py_test_attach_perf_event sudo ${CMAKE_CURRENT_SOURCE_DIR}/test_attach_perf_event.py)
 add_test(NAME py_test_utils WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   COMMAND ${TEST_WRAPPER} py_test_utils sudo ${CMAKE_CURRENT_SOURCE_DIR}/test_utils.py)
 add_test(NAME py_test_percpu WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
@@ -93,3 +95,7 @@ add_test(NAME py_ringbuf WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   COMMAND ${TEST_WRAPPER} py_ringbuf sudo ${CMAKE_CURRENT_SOURCE_DIR}/test_ringbuf.py)
 add_test(NAME py_queuestack WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   COMMAND ${TEST_WRAPPER} py_queuestack sudo ${CMAKE_CURRENT_SOURCE_DIR}/test_queuestack.py)
+add_test(NAME py_test_map_batch_ops WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  COMMAND ${TEST_WRAPPER} py_test_map_batch_ops sudo ${CMAKE_CURRENT_SOURCE_DIR}/test_map_batch_ops.py)
+add_test(NAME py_test_map_in_map WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  COMMAND ${TEST_WRAPPER} py_test_map_in_map sudo ${CMAKE_CURRENT_SOURCE_DIR}/test_map_in_map.py)

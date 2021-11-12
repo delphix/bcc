@@ -20,9 +20,12 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <fcntl.h>
 #include <iostream>
 #include <memory>
 #include <sstream>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <utility>
 #include <vector>
 
@@ -38,6 +41,37 @@
 #include "usdt.h"
 
 #include "BPF.h"
+
+namespace {
+/*
+ * Kernels ~4.20 and later support specifying the ref_ctr_offset as an argument
+ * to attaching a uprobe, which negates the need to seek to this memory offset
+ * in userspace to manage semaphores, as the kernel will do it for us.  This
+ * helper function checks if this support is available by reading the uprobe
+ * format for this value, added in a6ca88b241d5e929e6e60b12ad8cd288f0ffa
+*/
+bool uprobe_ref_ctr_supported() {
+  const char *ref_ctr_pmu_path =
+      "/sys/bus/event_source/devices/uprobe/format/ref_ctr_offset";
+  const char *ref_ctr_pmu_expected = "config:32-63\0";
+  char ref_ctr_pmu_fmt[64];  // in Linux source this buffer is compared vs
+                             // PAGE_SIZE, but 64 is probably ample
+  int fd = open(ref_ctr_pmu_path, O_RDONLY);
+  if (fd < 0)
+    return false;
+
+  int ret = read(fd, ref_ctr_pmu_fmt, sizeof(ref_ctr_pmu_fmt));
+  close(fd);
+  if (ret < 0) {
+    return false;
+  }
+  if (strncmp(ref_ctr_pmu_expected, ref_ctr_pmu_fmt,
+              strlen(ref_ctr_pmu_expected)) == 0) {
+    return true;
+  }
+  return false;
+}
+} // namespace
 
 namespace ebpf {
 
@@ -225,7 +259,8 @@ StatusTuple BPF::attach_uprobe(const std::string& binary_path,
                                const std::string& probe_func,
                                uint64_t symbol_addr,
                                bpf_probe_attach_type attach_type, pid_t pid,
-                               uint64_t symbol_offset) {
+                               uint64_t symbol_offset,
+                               uint32_t ref_ctr_offset) {
 
   if (symbol_addr != 0 && symbol_offset != 0)
     return StatusTuple(-1,
@@ -245,7 +280,8 @@ StatusTuple BPF::attach_uprobe(const std::string& binary_path,
   TRY2(load_func(probe_func, BPF_PROG_TYPE_KPROBE, probe_fd));
 
   int res_fd = bpf_attach_uprobe(probe_fd, attach_type, probe_event.c_str(),
-                                 binary_path.c_str(), offset, pid);
+                                 binary_path.c_str(), offset, pid,
+                                 ref_ctr_offset);
 
   if (res_fd < 0) {
     TRY2(unload_func(probe_func));
@@ -266,15 +302,16 @@ StatusTuple BPF::attach_uprobe(const std::string& binary_path,
 
 StatusTuple BPF::attach_usdt_without_validation(const USDT& u, pid_t pid) {
   auto& probe = *static_cast<::USDT::Probe*>(u.probe_.get());
-  if (!probe.enable(u.probe_func_))
-    return StatusTuple(-1, "Unable to enable USDT %s" + u.print_name());
+  if (!uprobe_ref_ctr_supported() && !probe.enable(u.probe_func_))
+    return StatusTuple(-1, "Unable to enable USDT %s", u.print_name().c_str());
 
   bool failed = false;
   std::string err_msg;
   int cnt = 0;
   for (const auto& loc : probe.locations_) {
     auto res = attach_uprobe(loc.bin_path_, std::string(), u.probe_func_,
-                              loc.address_, BPF_PROBE_ENTRY, pid);
+                             loc.address_, BPF_PROBE_ENTRY, pid, 0,
+                             probe.semaphore_offset());
     if (!res.ok()) {
       failed = true;
       err_msg += "USDT " + u.print_name() + " at " + loc.bin_path_ +
@@ -505,7 +542,7 @@ StatusTuple BPF::detach_usdt_without_validation(const USDT& u, pid_t pid) {
     }
   }
 
-  if (!probe.disable()) {
+  if (!uprobe_ref_ctr_supported() && !probe.disable()) {
     failed = true;
     err_msg += "Unable to disable USDT " + u.print_name();
   }
@@ -634,7 +671,7 @@ int BPF::poll_perf_buffer(const std::string& name, int timeout_ms) {
 }
 
 StatusTuple BPF::load_func(const std::string& func_name, bpf_prog_type type,
-                           int& fd) {
+                           int& fd, unsigned flags) {
   if (funcs_.find(func_name) != funcs_.end()) {
     fd = funcs_[func_name];
     return StatusTuple::OK();
@@ -655,7 +692,7 @@ StatusTuple BPF::load_func(const std::string& func_name, bpf_prog_type type,
   fd = bpf_module_->bcc_func_load(type, func_name.c_str(),
                      reinterpret_cast<struct bpf_insn*>(func_start), func_size,
                      bpf_module_->license(), bpf_module_->kern_version(),
-                     log_level, nullptr, 0);
+                     log_level, nullptr, 0, nullptr, flags);
 
   if (fd < 0)
     return StatusTuple(-1, "Failed to load %s: %d", func_name.c_str(), fd);
@@ -794,13 +831,6 @@ BPFStackBuildIdTable BPF::get_stackbuildid_table(const std::string &name, bool u
   if (bpf_module_->table_storage().Find(Path({bpf_module_->id(), name}), it))
     return BPFStackBuildIdTable(it->second, use_debug_file, check_debug_file_crc, get_bsymcache());
   return BPFStackBuildIdTable({}, use_debug_file, check_debug_file_crc, get_bsymcache());
-}
-
-BPFMapInMapTable BPF::get_map_in_map_table(const std::string& name) {
-  TableStorage::iterator it;
-  if (bpf_module_->table_storage().Find(Path({bpf_module_->id(), name}), it))
-    return BPFMapInMapTable(it->second);
-  return BPFMapInMapTable({});
 }
 
 BPFSockmapTable BPF::get_sockmap_table(const std::string& name) {

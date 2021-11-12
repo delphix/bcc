@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (c) 2020 Wenbo Zhang
-#include "vmlinux.h"
+#include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_tracing.h>
@@ -8,6 +8,8 @@
 #include "bits.bpf.h"
 
 #define MAX_ENTRIES	10240
+
+extern int LINUX_KERNEL_VERSION __kconfig;
 
 const volatile bool targ_per_disk = false;
 const volatile bool targ_per_flag = false;
@@ -34,8 +36,11 @@ struct {
 } hists SEC(".maps");
 
 static __always_inline
-int trace_rq_start(struct request *rq)
+int trace_rq_start(struct request *rq, int issue)
 {
+	if (issue && targ_queued && BPF_CORE_READ(rq->q, elevator))
+		return 0;
+
 	u64 ts = bpf_ktime_get_ns();
 
 	if (targ_dev != -1) {
@@ -52,17 +57,31 @@ int trace_rq_start(struct request *rq)
 }
 
 SEC("tp_btf/block_rq_insert")
-int BPF_PROG(block_rq_insert, struct request_queue *q, struct request *rq)
+int block_rq_insert(u64 *ctx)
 {
-	return trace_rq_start(rq);
+	/**
+	 * commit a54895fa (v5.11-rc1) changed tracepoint argument list
+	 * from TP_PROTO(struct request_queue *q, struct request *rq)
+	 * to TP_PROTO(struct request *rq)
+	 */
+	if (LINUX_KERNEL_VERSION <= KERNEL_VERSION(5, 10, 0))
+		return trace_rq_start((void *)ctx[1], false);
+	else
+		return trace_rq_start((void *)ctx[0], false);
 }
 
 SEC("tp_btf/block_rq_issue")
-int BPF_PROG(block_rq_issue, struct request_queue *q, struct request *rq)
+int block_rq_issue(u64 *ctx)
 {
-	if (targ_queued && BPF_CORE_READ(q, elevator))
-		return 0;
-	return trace_rq_start(rq);
+	/**
+	 * commit a54895fa (v5.11-rc1) changed tracepoint argument list
+	 * from TP_PROTO(struct request_queue *q, struct request *rq)
+	 * to TP_PROTO(struct request *rq)
+	 */
+	if (LINUX_KERNEL_VERSION <= KERNEL_VERSION(5, 10, 0))
+		return trace_rq_start((void *)ctx[1], true);
+	else
+		return trace_rq_start((void *)ctx[0], true);
 }
 
 SEC("tp_btf/block_rq_complete")

@@ -5,6 +5,7 @@
 // Based on opensnoop(8) from BCC by Brendan Gregg and others.
 // 14-Feb-2020   Brendan Gregg   Created this.
 #include <argp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +29,8 @@
 
 #define NSEC_PER_SEC		1000000000ULL
 
+static volatile sig_atomic_t exiting = 0;
+
 static struct env {
 	pid_t pid;
 	pid_t tid;
@@ -44,7 +47,8 @@ static struct env {
 };
 
 const char *argp_program_version = "opensnoop 0.1";
-const char *argp_program_bug_address = "<bpf@vger.kernel.org>";
+const char *argp_program_bug_address =
+	"https://github.com/iovisor/bcc/tree/master/libbpf-tools";
 const char argp_program_doc[] =
 "Trace open family syscalls\n"
 "\n"
@@ -164,6 +168,11 @@ int libbpf_print_fn(enum libbpf_print_level level,
 	return vfprintf(stderr, format, args);
 }
 
+static void sig_int(int signo)
+{
+	exiting = 1;
+}
+
 void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
 {
 	const struct event *e = data;
@@ -231,7 +240,7 @@ int main(int argc, char **argv)
 
 	obj = opensnoop_bpf__open();
 	if (!obj) {
-		fprintf(stderr, "failed to open and/or load BPF object\n");
+		fprintf(stderr, "failed to open BPF object\n");
 		return 1;
 	}
 
@@ -240,6 +249,16 @@ int main(int argc, char **argv)
 	obj->rodata->targ_pid = env.tid;
 	obj->rodata->targ_uid = env.uid;
 	obj->rodata->targ_failed = env.failed;
+
+#ifdef __aarch64__
+	/* aarch64 has no open syscall, only openat variants.
+	 * Disable associated tracepoints that do not exist. See #3344.
+	 */
+	bpf_program__set_autoload(
+		obj->progs.tracepoint__syscalls__sys_enter_open, false);
+	bpf_program__set_autoload(
+		obj->progs.tracepoint__syscalls__sys_exit_open, false);
+#endif
 
 	err = opensnoop_bpf__load(obj);
 	if (err) {
@@ -279,15 +298,24 @@ int main(int argc, char **argv)
 	if (env.duration)
 		time_end = get_ktime_ns() + env.duration * NSEC_PER_SEC;
 
+	if (signal(SIGINT, sig_int) == SIG_ERR) {
+		fprintf(stderr, "can't set signal handler: %s\n", strerror(errno));
+		err = 1;
+		goto cleanup;
+	}
+
 	/* main: poll */
-	while (1) {
-		usleep(PERF_BUFFER_TIME_MS * 1000);
-		if ((err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS)) < 0)
-			break;
+	while (!exiting) {
+		err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS);
+		if (err < 0 && errno != EINTR) {
+			fprintf(stderr, "error polling perf buffer: %s\n", strerror(errno));
+			goto cleanup;
+		}
 		if (env.duration && get_ktime_ns() > time_end)
 			goto cleanup;
+		/* reset err to return 0 if exiting */
+		err = 0;
 	}
-	printf("Error polling perf buffer: %d\n", err);
 
 cleanup:
 	perf_buffer__free(pb);

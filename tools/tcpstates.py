@@ -5,7 +5,7 @@
 # tcpstates   Trace the TCP session state changes with durations.
 #             For Linux, uses BCC, BPF. Embedded C.
 #
-# USAGE: tcpstates [-h] [-C] [-S] [interval [count]]
+# USAGE: tcpstates [-h] [-C] [-S] [interval [count]] [-4 | -6]
 #
 # This uses the sock:inet_sock_set_state tracepoint, added to Linux 4.16.
 # Linux 4.16 also adds more state transitions so that they can be traced.
@@ -34,6 +34,8 @@ examples = """examples:
     ./tcpstates -L 80     # only trace local port 80
     ./tcpstates -L 80,81  # only trace local ports 80 and 81
     ./tcpstates -D 80     # only trace remote port 80
+    ./tcpstates -4        # trace IPv4 family only
+    ./tcpstates -6        # trace IPv6 family only
 """
 parser = argparse.ArgumentParser(
     description="Trace TCP session state changes and durations",
@@ -55,6 +57,11 @@ parser.add_argument("--ebpf", action="store_true",
     help=argparse.SUPPRESS)
 parser.add_argument("-Y", "--journal", action="store_true",
     help="log session state changes to the systemd journal")
+group = parser.add_mutually_exclusive_group()
+group.add_argument("-4", "--ipv4", action="store_true",
+    help="trace IPv4 family only")
+group.add_argument("-6", "--ipv6", action="store_true",
+    help="trace IPv6 family only")
 args = parser.parse_args()
 debug = 0
 
@@ -126,7 +133,9 @@ TRACEPOINT_PROBE(sock, inet_sock_set_state)
         delta_us = 0;
     else
         delta_us = (bpf_ktime_get_ns() - *tsp) / 1000;
-
+    u16 family = args->family;
+    FILTER_FAMILY
+    
     if (args->family == AF_INET) {
         struct ipv4_data_t data4 = {
             .span_us = delta_us,
@@ -159,8 +168,12 @@ TRACEPOINT_PROBE(sock, inet_sock_set_state)
         ipv6_events.perf_submit(args, &data6, sizeof(data6));
     }
 
-    u64 ts = bpf_ktime_get_ns();
-    last.update(&sk, &ts);
+    if (args->newstate == TCP_CLOSE) {
+        last.delete(&sk);
+    } else {
+        u64 ts = bpf_ktime_get_ns();
+        last.update(&sk, &ts);
+    }
 
     return 0;
 }
@@ -178,6 +191,7 @@ int kprobe__tcp_set_state(struct pt_regs *ctx, struct sock *sk, int state)
 
     // dport is either used in a filter here, or later
     u16 dport = sk->__sk_common.skc_dport;
+    dport = ntohs(dport);
     FILTER_DPORT
 
     // calculate delta
@@ -189,7 +203,8 @@ int kprobe__tcp_set_state(struct pt_regs *ctx, struct sock *sk, int state)
         delta_us = (bpf_ktime_get_ns() - *tsp) / 1000;
 
     u16 family = sk->__sk_common.skc_family;
-
+    FILTER_FAMILY
+    
     if (family == AF_INET) {
         struct ipv4_data_t data4 = {
             .span_us = delta_us,
@@ -224,8 +239,12 @@ int kprobe__tcp_set_state(struct pt_regs *ctx, struct sock *sk, int state)
         ipv6_events.perf_submit(ctx, &data6, sizeof(data6));
     }
 
-    u64 ts = bpf_ktime_get_ns();
-    last.update(&sk, &ts);
+    if (state == TCP_CLOSE) {
+        last.delete(&sk);
+    } else {
+        u64 ts = bpf_ktime_get_ns();
+        last.update(&sk, &ts);
+    }
 
     return 0;
 
@@ -249,6 +268,13 @@ if args.localport:
     lports_if = ' && '.join(['lport != %d' % lport for lport in lports])
     bpf_text = bpf_text.replace('FILTER_LPORT',
         'if (%s) { last.delete(&sk); return 0; }' % lports_if)
+if args.ipv4:
+    bpf_text = bpf_text.replace('FILTER_FAMILY',
+        'if (family != AF_INET) { return 0; }')
+elif args.ipv6:
+    bpf_text = bpf_text.replace('FILTER_FAMILY',
+        'if (family != AF_INET6) { return 0; }')
+bpf_text = bpf_text.replace('FILTER_FAMILY', '')
 bpf_text = bpf_text.replace('FILTER_DPORT', '')
 bpf_text = bpf_text.replace('FILTER_LPORT', '')
 

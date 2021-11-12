@@ -274,6 +274,14 @@ BPFStackTable::~BPFStackTable() {
     bcc_free_symcache(it.second, it.first);
 }
 
+void BPFStackTable::free_symcache(int pid) {
+  auto iter = pid_sym_.find(pid);
+  if (iter != pid_sym_.end()) {
+    bcc_free_symcache(iter->second, iter->first);
+    pid_sym_.erase(iter);
+  }
+}
+
 void BPFStackTable::clear_table_non_atomic() {
   for (int i = 0; size_t(i) < capacity(); i++) {
     remove(&i);
@@ -676,27 +684,6 @@ StatusTuple BPFXskmapTable::get_value(const int& index,
 }
 
 StatusTuple BPFXskmapTable::remove_value(const int& index) {
-    if (!this->remove(const_cast<int*>(&index)))
-      return StatusTuple(-1, "Error removing value: %s", std::strerror(errno));
-    return StatusTuple::OK();
-}
-
-BPFMapInMapTable::BPFMapInMapTable(const TableDesc& desc)
-    : BPFTableBase<int, int>(desc) {
-    if(desc.type != BPF_MAP_TYPE_ARRAY_OF_MAPS &&
-       desc.type != BPF_MAP_TYPE_HASH_OF_MAPS)
-      throw std::invalid_argument("Table '" + desc.name +
-                                  "' is not a map-in-map table");
-}
-
-StatusTuple BPFMapInMapTable::update_value(const int& index,
-                                           const int& inner_map_fd) {
-    if (!this->update(const_cast<int*>(&index), const_cast<int*>(&inner_map_fd)))
-      return StatusTuple(-1, "Error updating value: %s", std::strerror(errno));
-    return StatusTuple::OK();
-}
-
-StatusTuple BPFMapInMapTable::remove_value(const int& index) {
     if (!this->remove(const_cast<int*>(&index)))
       return StatusTuple(-1, "Error removing value: %s", std::strerror(errno));
     return StatusTuple::OK();

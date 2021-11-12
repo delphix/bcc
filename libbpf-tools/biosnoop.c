@@ -4,6 +4,7 @@
 // Based on biosnoop(8) from BCC by Brendan Gregg.
 // 29-Jun-2020   Wenbo Zhang   Created this.
 #include <argp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <time.h>
@@ -18,6 +19,8 @@
 #define PERF_BUFFER_PAGES	16
 #define PERF_POLL_TIMEOUT_MS	100
 
+static volatile sig_atomic_t exiting = 0;
+
 static struct env {
 	char *disk;
 	int duration;
@@ -29,11 +32,12 @@ static struct env {
 static volatile __u64 start_ts;
 
 const char *argp_program_version = "biosnoop 0.1";
-const char *argp_program_bug_address = "<bpf@vger.kernel.org>";
+const char *argp_program_bug_address =
+	"https://github.com/iovisor/bcc/tree/master/libbpf-tools";
 const char argp_program_doc[] =
 "Trace block I/O.\n"
 "\n"
-"USAGE: biosnoop [--help] [-d] [-Q]\n"
+"USAGE: biosnoop [--help] [-d DISK] [-Q]\n"
 "\n"
 "EXAMPLES:\n"
 "    biosnoop              # trace all block I/O\n"
@@ -45,6 +49,7 @@ static const struct argp_option opts[] = {
 	{ "queued", 'Q', NULL, 0, "Include OS queued time in I/O time" },
 	{ "disk",  'd', "DISK",  0, "Trace this disk only" },
 	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
+	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
 	{},
 };
 
@@ -53,6 +58,9 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	static int pos_args;
 
 	switch (key) {
+	case 'h':
+		argp_state_help(state, stderr, ARGP_HELP_STD_HELP);
+		break;
 	case 'v':
 		env.verbose = true;
 		break;
@@ -91,6 +99,11 @@ int libbpf_print_fn(enum libbpf_print_level level,
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
 	return vfprintf(stderr, format, args);
+}
+
+static void sig_int(int signo)
+{
+	exiting = 1;
 }
 
 static void blk_fill_rwbs(char *rwbs, unsigned int op)
@@ -190,7 +203,7 @@ int main(int argc, char **argv)
 
 	obj = biosnoop_bpf__open();
 	if (!obj) {
-		fprintf(stderr, "failed to open and/or load BPF ojbect\n");
+		fprintf(stderr, "failed to open BPF object\n");
 		return 1;
 	}
 
@@ -288,16 +301,27 @@ int main(int argc, char **argv)
 	if (env.duration)
 		time_end = get_ktime_ns() + env.duration * NSEC_PER_SEC;
 
+	if (signal(SIGINT, sig_int) == SIG_ERR) {
+		fprintf(stderr, "can't set signal handler: %s\n", strerror(errno));
+		err = 1;
+		goto cleanup;
+	}
+
 	/* main: poll */
-	while (1) {
-		if ((err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS)) < 0)
-			break;
+	while (!exiting) {
+		err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS);
+		if (err < 0 && errno != EINTR) {
+			fprintf(stderr, "error polling perf buffer: %s\n", strerror(errno));
+			goto cleanup;
+		}
 		if (env.duration && get_ktime_ns() > time_end)
 			goto cleanup;
+		/* reset err to return 0 if exiting */
+		err = 0;
 	}
-	printf("error polling perf buffer: %d\n", err);
 
 cleanup:
+	perf_buffer__free(pb);
 	biosnoop_bpf__destroy(obj);
 	ksyms__free(ksyms);
 	partitions__free(partitions);

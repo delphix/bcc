@@ -17,8 +17,11 @@
 
 #define warn(...) fprintf(stderr, __VA_ARGS__)
 
+static volatile sig_atomic_t exiting = 0;
+
 const char *argp_program_version = "tcpconnect 0.1";
-const char *argp_program_bug_address = "<bpf@vger.kernel.org>";
+const char *argp_program_bug_address =
+	"https://github.com/iovisor/bcc/tree/master/libbpf-tools";
 static const char argp_program_doc[] =
 	"\ntcpconnect: Count/Trace active tcp connections\n"
 	"\n"
@@ -110,6 +113,7 @@ static const struct argp_option opts[] = {
 	  "Comma-separated list of destination ports to trace" },
 	{ "cgroupmap", 'C', "PATH", 0, "trace cgroups in this map" },
 	{ "mntnsmap", 'M', "PATH", 0, "trace mount namespaces in this map" },
+	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
 	{},
 };
 
@@ -132,6 +136,9 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	int nports;
 
 	switch (key) {
+	case 'h':
+		argp_state_help(state, stderr, ARGP_HELP_STD_HELP);
+		break;
 	case 'v':
 		env.verbose = true;
 		break;
@@ -187,11 +194,9 @@ static int libbpf_print_fn(enum libbpf_print_level level,
 	return vfprintf(stderr, format, args);
 }
 
-static volatile sig_atomic_t hang_on = 1;
-
 static void sig_int(int signo)
 {
-	hang_on = 0;
+	exiting = 1;
 }
 
 static void print_count_ipv4(int map_fd)
@@ -203,7 +208,7 @@ static void print_count_ipv4(int map_fd)
 	static __u64 counts[MAX_ENTRIES];
 	char s[INET_ADDRSTRLEN];
 	char d[INET_ADDRSTRLEN];
-	__u32 n = MAX_ENTRIES;
+	__u32 i, n = MAX_ENTRIES;
 	struct in_addr src;
 	struct in_addr dst;
 
@@ -212,7 +217,7 @@ static void print_count_ipv4(int map_fd)
 		return;
 	}
 
-	for (__u32 i = 0; i < n; i++) {
+	for (i = 0; i < n; i++) {
 		src.s_addr = keys[i].saddr;
 		dst.s_addr = keys[i].daddr;
 
@@ -232,7 +237,7 @@ static void print_count_ipv6(int map_fd)
 	static __u64 counts[MAX_ENTRIES];
 	char s[INET6_ADDRSTRLEN];
 	char d[INET6_ADDRSTRLEN];
-	__u32 n = MAX_ENTRIES;
+	__u32 i, n = MAX_ENTRIES;
 	struct in6_addr src;
 	struct in6_addr dst;
 
@@ -241,7 +246,7 @@ static void print_count_ipv6(int map_fd)
 		return;
 	}
 
-	for (__u32 i = 0; i < n; i++) {
+	for (i = 0; i < n; i++) {
 		memcpy(src.s6_addr, keys[i].saddr, sizeof(src.s6_addr));
 		memcpy(dst.s6_addr, keys[i].daddr, sizeof(src.s6_addr));
 
@@ -256,7 +261,7 @@ static void print_count(int map_fd_ipv4, int map_fd_ipv6)
 {
 	static const char *header_fmt = "\n%-25s %-25s %-20s %-10s\n";
 
-	while (hang_on)
+	while (!exiting)
 		pause();
 
 	printf(header_fmt, "LADDR", "RADDR", "RPORT", "CONNECTS");
@@ -336,12 +341,14 @@ static void print_events(int perf_map_fd)
 	}
 
 	print_events_header();
-	while (hang_on) {
+	while (!exiting) {
 		err = perf_buffer__poll(pb, 100);
 		if (err < 0 && errno != EINTR) {
-			warn("Error polling perf buffer: %d\n", err);
+			warn("error polling perf buffer: %s\n", strerror(errno));
 			goto cleanup;
 		}
+		/* reset err to return 0 if exiting */
+		err = 0;
 	}
 
 cleanup:
@@ -357,7 +364,7 @@ int main(int argc, char **argv)
 		.args_doc = NULL,
 	};
 	struct tcpconnect_bpf *obj;
-	int err;
+	int i, err;
 
 	err = argp_parse(&argp, argc, argv, 0, NULL, NULL);
 	if (err)
@@ -385,7 +392,7 @@ int main(int argc, char **argv)
 		obj->rodata->filter_uid = env.uid;
 	if (env.nports > 0) {
 		obj->rodata->filter_ports_len = env.nports;
-		for (int i = 0; i < env.nports; i++) {
+		for (i = 0; i < env.nports; i++) {
 			obj->rodata->filter_ports[i] = htons(env.ports[i]);
 		}
 	}
@@ -403,7 +410,8 @@ int main(int argc, char **argv)
 	}
 
 	if (signal(SIGINT, sig_int) == SIG_ERR) {
-		warn("can't set signal handler: %s\n", strerror(-errno));
+		warn("can't set signal handler: %s\n", strerror(errno));
+		err = 1;
 		goto cleanup;
 	}
 

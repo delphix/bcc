@@ -123,6 +123,7 @@ pair of .c and .py files, and some are directories of files.
 - tools/[inject](tools/inject.py): Targeted error injection with call chain and predicates [Examples](tools/inject_example.txt).
 - tools/[killsnoop](tools/killsnoop.py): Trace signals issued by the kill() syscall. [Examples](tools/killsnoop_example.txt).
 - tools/[klockstat](tools/klockstat.py): Traces kernel mutex lock events and display locks statistics. [Examples](tools/klockstat_example.txt).
+- tools/[kvmexit](tools/kvmexit.py): Display the exit_reason and its statistics of each vm exit. [Examples](tools/kvmexit_example.txt).
 - tools/[llcstat](tools/llcstat.py): Summarize CPU cache references and misses by process. [Examples](tools/llcstat_example.txt).
 - tools/[mdflush](tools/mdflush.py): Trace md flush events. [Examples](tools/mdflush_example.txt).
 - tools/[memleak](tools/memleak.py): Display outstanding memory allocations to find memory leaks. [Examples](tools/memleak_example.txt).
@@ -149,7 +150,6 @@ pair of .c and .py files, and some are directories of files.
 - tools/[solisten](tools/solisten.py): Trace TCP socket listen. [Examples](tools/solisten_example.txt).
 - tools/[sslsniff](tools/sslsniff.py): Sniff OpenSSL written and readed data. [Examples](tools/sslsniff_example.txt).
 - tools/[stackcount](tools/stackcount.py): Count kernel function calls and their stack traces. [Examples](tools/stackcount_example.txt).
-- tools/[swapin](tools/swapin.py): Count swapins by process. [Examples](tools/swapin_example.txt).
 - tools/[syncsnoop](tools/syncsnoop.py): Trace sync() syscall. [Examples](tools/syncsnoop_example.txt).
 - tools/[syscount](tools/syscount.py): Summarize syscall counts and latencies. [Examples](tools/syscount_example.txt).
 - tools/[tcpaccept](tools/tcpaccept.py): Trace TCP passive connections (accept()). [Examples](tools/tcpaccept_example.txt).
@@ -174,8 +174,9 @@ pair of .c and .py files, and some are directories of files.
 - tools/[uobjnew](tools/lib/uobjnew.py): Summarize object allocation events by object type and number of bytes allocated. [Examples](tools/lib/uobjnew_example.txt).
 - tools/[ustat](tools/lib/ustat.py): Collect events such as GCs, thread creations, object allocations, exceptions and more in high-level languages. [Examples](tools/lib/ustat_example.txt).
 - tools/[uthreads](tools/lib/uthreads.py): Trace thread creation events in Java and raw pthreads. [Examples](tools/lib/uthreads_example.txt).
-- tools/[vfscount](tools/vfscount.py) tools/[vfscount.c](tools/vfscount.c): Count VFS calls. [Examples](tools/vfscount_example.txt).
-- tools/[vfsstat](tools/vfsstat.py) tools/[vfsstat.c](tools/vfsstat.c): Count some VFS calls, with column output. [Examples](tools/vfsstat_example.txt).
+- tools/[vfscount](tools/vfscount.py): Count VFS calls. [Examples](tools/vfscount_example.txt).
+- tools/[vfsstat](tools/vfsstat.py): Count some VFS calls, with column output. [Examples](tools/vfsstat_example.txt).
+- tools/[virtiostat](tools/virtiostat.py): Show VIRTIO device IO statistics. [Examples](tools/virtiostat_example.txt).
 - tools/[wakeuptime](tools/wakeuptime.py): Summarize sleep to wakeup time by waker kernel stack. [Examples](tools/wakeuptime_example.txt).
 - tools/[xfsdist](tools/xfsdist.py): Summarize XFS operation latency distribution as a histogram. [Examples](tools/xfsdist_example.txt).
 - tools/[xfsslower](tools/xfsslower.py): Trace slow XFS operations. [Examples](tools/xfsslower_example.txt).

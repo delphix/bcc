@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (c) 2020 Wenbo Zhang
-#include "vmlinux.h"
+#include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_tracing.h>
 #include "cpudist.h"
 #include "bits.bpf.h"
+#include "core_fixes.bpf.h"
 
 #define TASK_RUNNING	0
 
@@ -62,7 +63,8 @@ static __always_inline void update_hist(struct task_struct *task,
 		histp = bpf_map_lookup_elem(&hists, &id);
 		if (!histp)
 			return;
-		BPF_CORE_READ_STR_INTO(&histp->comm, task, comm);
+		bpf_probe_read_kernel_str(&histp->comm, sizeof(task->comm),
+					  task->comm);
 	}
 	delta = ts - *tsp;
 	if (targ_ms)
@@ -75,20 +77,19 @@ static __always_inline void update_hist(struct task_struct *task,
 	__sync_fetch_and_add(&histp->slots[slot], 1);
 }
 
-SEC("kprobe/finish_task_switch")
-int BPF_KPROBE(finish_task_switch, struct task_struct *prev)
+SEC("tp_btf/sched_switch")
+int BPF_PROG(sched_switch, bool preempt, struct task_struct *prev,
+	     struct task_struct *next)
 {
-	u32 prev_tgid = BPF_CORE_READ(prev, tgid);
-	u32 prev_pid = BPF_CORE_READ(prev, pid);
-	u64 id = bpf_get_current_pid_tgid();
-	u32 tgid = id >> 32, pid = id;
+	u32 prev_tgid = prev->tgid, prev_pid = prev->pid;
+	u32 tgid = next->tgid, pid = next->pid;
 	u64 ts = bpf_ktime_get_ns();
 
 	if (targ_offcpu) {
 		store_start(prev_tgid, prev_pid, ts);
-		update_hist((void*)bpf_get_current_task(), tgid, pid, ts);
+		update_hist(next, tgid, pid, ts);
 	} else {
-		if (BPF_CORE_READ(prev, state) == TASK_RUNNING)
+		if (get_task_state(prev) == TASK_RUNNING)
 			update_hist(prev, prev_tgid, prev_pid, ts);
 		store_start(tgid, pid, ts);
 	}

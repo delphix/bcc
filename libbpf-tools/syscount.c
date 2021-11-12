@@ -27,7 +27,8 @@ struct data_ext_t {
 #define warn(...) fprintf(stderr, __VA_ARGS__)
 
 const char *argp_program_version = "syscount 0.1";
-const char *argp_program_bug_address = "<bpf@vger.kernel.org>";
+const char *argp_program_bug_address =
+	"https://github.com/iovisor/bcc/tree/master/libbpf-tools";
 static const char argp_program_doc[] =
 "\nsyscount: summarize syscall counts and latencies\n"
 "\n"
@@ -55,6 +56,7 @@ static const struct argp_option opts[] = {
 	{ "errno", 'e', "ERRNO", 0, "Trace only syscalls that return this error"
 				 "(numeric or EPERM, etc.)" },
 	{ "list", 'l', NULL, 0, "Print list of recognized syscalls and exit" },
+	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
 	{},
 };
 
@@ -149,9 +151,10 @@ static void print_latency(struct data_ext_t *vals, size_t count)
 {
 	double div = env.milliseconds ? 1000000.0 : 1000.0;
 	char buf[2 * TASK_COMM_LEN];
+	int i;
 
 	print_latency_header();
-	for (int i = 0; i < count && i < env.top; i++)
+	for (i = 0; i < count && i < env.top; i++)
 		printf("%-22s %8llu %16.3lf\n",
 		       agg_col(&vals[i], buf, sizeof(buf)),
 		       vals[i].count, vals[i].total_ns / div);
@@ -161,9 +164,10 @@ static void print_latency(struct data_ext_t *vals, size_t count)
 static void print_count(struct data_ext_t *vals, size_t count)
 {
 	char buf[2 * TASK_COMM_LEN];
+	int i;
 
 	print_count_header();
-	for (int i = 0; i < count && i < env.top; i++)
+	for (i = 0; i < count && i < env.top; i++)
 		printf("%-22s %8llu\n",
 		       agg_col(&vals[i], buf, sizeof(buf)), vals[i].count);
 	printf("\n");
@@ -186,7 +190,7 @@ static bool read_vals_batch(int fd, struct data_ext_t *vals, __u32 *count)
 {
 	struct data_t orig_vals[*count];
 	void *in = NULL, *out;
-	__u32 n, n_read = 0;
+	__u32 i, n, n_read = 0;
 	__u32 keys[*count];
 	int err = 0;
 
@@ -206,7 +210,7 @@ static bool read_vals_batch(int fd, struct data_ext_t *vals, __u32 *count)
 		in = out;
 	}
 
-	for (__u32 i = 0; i < n_read; i++) {
+	for (i = 0; i < n_read; i++) {
 		vals[i].count = orig_vals[i].count;
 		vals[i].total_ns = orig_vals[i].total_ns;
 		vals[i].key = keys[i];
@@ -223,7 +227,7 @@ static bool read_vals(int fd, struct data_ext_t *vals, __u32 *count)
 	struct data_t val;
 	__u32 key = -1;
 	__u32 next_key;
-	int i = 0;
+	int i = 0, j;
 	int err;
 
 	if (batch_map_ops) {
@@ -250,7 +254,7 @@ static bool read_vals(int fd, struct data_ext_t *vals, __u32 *count)
 		key = keys[i++] = next_key;
 	}
 
-	for (int j = 0; j < i; j++) {
+	for (j = 0; j < i; j++) {
 		err = bpf_map_lookup_elem(fd, &keys[j], &val);
 		if (err && errno != ENOENT) {
 			warn("failed to lookup element: %s\n", strerror(errno));
@@ -267,7 +271,7 @@ static bool read_vals(int fd, struct data_ext_t *vals, __u32 *count)
 	 * will be fixed in future by using bpf_map_lookup_and_delete_batch,
 	 * but this function is too fresh to use it in bcc. */
 
-	for (int j = 0; j < i; j++) {
+	for (j = 0; j < i; j++) {
 		err = bpf_map_delete_elem(fd, &keys[j]);
 		if (err) {
 			warn("failed to delete element: %s\n", strerror(errno));
@@ -285,6 +289,9 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	int err;
 
 	switch (key) {
+	case 'h':
+		argp_state_help(state, stderr, ARGP_HELP_STD_HELP);
+		break;
 	case 'v':
 		env.verbose = true;
 		break;
@@ -394,7 +401,7 @@ int main(int argc, char **argv)
 
 	obj = syscount_bpf__open();
 	if (!obj) {
-		warn("failed to open and/or load BPF object\n");
+		warn("failed to open BPF object\n");
 		err = 1;
 		goto free_names;
 	}

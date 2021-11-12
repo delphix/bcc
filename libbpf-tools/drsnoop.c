@@ -4,6 +4,7 @@
 // Based on drsnoop(8) from BCC by Wenbo Zhang.
 // 28-Feb-2020   Wenbo Zhang   Created this.
 #include <argp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,8 @@
 #define PERF_BUFFER_PAGES	16
 #define PERF_POLL_TIMEOUT_MS	100
 
+static volatile sig_atomic_t exiting = 0;
+
 static struct env {
 	pid_t pid;
 	pid_t tid;
@@ -27,7 +30,8 @@ static struct env {
 } env = { };
 
 const char *argp_program_version = "drsnoop 0.1";
-const char *argp_program_bug_address = "<bpf@vger.kernel.org>";
+const char *argp_program_bug_address =
+	"https://github.com/iovisor/bcc/tree/master/libbpf-tools";
 const char argp_program_doc[] =
 "Trace direct reclaim latency.\n"
 "\n"
@@ -46,6 +50,7 @@ static const struct argp_option opts[] = {
 	{ "pid", 'p', "PID", 0, "Process PID to trace" },
 	{ "tid", 't', "TID", 0, "Thread TID to trace" },
 	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
+	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
 	{},
 };
 
@@ -57,6 +62,9 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	int pid;
 
 	switch (key) {
+	case 'h':
+		argp_state_help(state, stderr, ARGP_HELP_STD_HELP);
+		break;
 	case 'v':
 		env.verbose = true;
 		break;
@@ -102,6 +110,11 @@ int libbpf_print_fn(enum libbpf_print_level level,
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
 	return vfprintf(stderr, format, args);
+}
+
+static void sig_int(int signo)
+{
+	exiting = 1;
 }
 
 void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
@@ -156,7 +169,7 @@ int main(int argc, char **argv)
 
 	obj = drsnoop_bpf__open();
 	if (!obj) {
-		fprintf(stderr, "failed to open and/or load BPF object\n");
+		fprintf(stderr, "failed to open BPF object\n");
 		return 1;
 	}
 
@@ -216,14 +229,24 @@ int main(int argc, char **argv)
 	if (env.duration)
 		time_end = get_ktime_ns() + env.duration * NSEC_PER_SEC;
 
+	if (signal(SIGINT, sig_int) == SIG_ERR) {
+		fprintf(stderr, "can't set signal handler: %s\n", strerror(errno));
+		err = 1;
+		goto cleanup;
+	}
+
 	/* main: poll */
-	while (1) {
-		if ((err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS)) < 0)
-			break;
+	while (!exiting) {
+		err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS);
+		if (err < 0 && errno != EINTR) {
+			fprintf(stderr, "error polling perf buffer: %s\n", strerror(errno));
+			goto cleanup;
+		}
 		if (env.duration && get_ktime_ns() > time_end)
 			goto cleanup;
+		/* reset err to return 0 if exiting */
+		err = 0;
 	}
-	printf("error polling perf buffer: %d\n", err);
 
 cleanup:
 	perf_buffer__free(pb);

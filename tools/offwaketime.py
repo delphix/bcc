@@ -139,12 +139,12 @@ bpf_text = """
 struct key_t {
     char waker[TASK_COMM_LEN];
     char target[TASK_COMM_LEN];
-    int w_k_stack_id;
-    int w_u_stack_id;
-    int t_k_stack_id;
-    int t_u_stack_id;
-    u32 t_pid;
-    u32 t_tgid;
+    s64 w_k_stack_id;
+    s64 w_u_stack_id;
+    s64 t_k_stack_id;
+    s64 t_u_stack_id;
+    u64 t_pid;
+    u64 t_tgid;
     u32 w_pid;
     u32 w_tgid;
 };
@@ -254,14 +254,18 @@ elif args.kernel_threads_only:
 else:
     thread_filter = '1'
 if args.state == 0:
-    state_filter = 'p->state == 0'
+    state_filter = 'p->STATE_FIELD == 0'
 elif args.state:
     # these states are sometimes bitmask checked
-    state_filter = 'p->state & %d' % args.state
+    state_filter = 'p->STATE_FIELD & %d' % args.state
 else:
     state_filter = '1'
 bpf_text = bpf_text.replace('THREAD_FILTER', thread_filter)
 bpf_text = bpf_text.replace('STATE_FILTER', state_filter)
+if BPF.kernel_struct_has_field(b'task_struct', b'__state') == 1:
+    bpf_text = bpf_text.replace('STATE_FIELD', '__state')
+else:
+    bpf_text = bpf_text.replace('STATE_FIELD', 'state')
 
 # set stack storage size
 bpf_text = bpf_text.replace('STACK_STORAGE_SIZE', str(args.stack_storage_size))
@@ -288,7 +292,8 @@ if args.ebpf:
 
 # initialize BPF
 b = BPF(text=bpf_text)
-b.attach_kprobe(event="finish_task_switch", fn_name="oncpu")
+b.attach_kprobe(event_re="^finish_task_switch$|^finish_task_switch\.isra\.\d$",
+                fn_name="oncpu")
 b.attach_kprobe(event="try_to_wake_up", fn_name="waker")
 matched = b.num_open_kprobes()
 if matched == 0:

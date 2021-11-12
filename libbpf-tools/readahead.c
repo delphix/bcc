@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
 // Copyright (c) 2020 Wenbo Zhang
 //
-// Based on readahead(8) from from BPF-Perf-Tools-Book by Brendan Gregg.
+// Based on readahead(8) from BPF-Perf-Tools-Book by Brendan Gregg.
 // 8-Jun-2020   Wenbo Zhang   Created this.
 #include <argp.h>
 #include <signal.h>
@@ -23,7 +23,8 @@ static struct env {
 static volatile bool exiting;
 
 const char *argp_program_version = "readahead 0.1";
-const char *argp_program_bug_address = "<bpf@vger.kernel.org>";
+const char *argp_program_bug_address =
+	"https://github.com/iovisor/bcc/tree/master/libbpf-tools";
 const char argp_program_doc[] =
 "Show fs automatic read-ahead usage.\n"
 "\n"
@@ -36,12 +37,16 @@ const char argp_program_doc[] =
 static const struct argp_option opts[] = {
 	{ "duration", 'd', "DURATION", 0, "Duration to trace"},
 	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
+	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
 	{},
 };
 
 static error_t parse_arg(int key, char *arg, struct argp_state *state)
 {
 	switch (key) {
+	case 'h':
+		argp_state_help(state, stderr, ARGP_HELP_STD_HELP);
+		break;
 	case 'v':
 		env.verbose = true;
 		break;
@@ -72,6 +77,24 @@ static void sig_handler(int sig)
 	exiting = true;
 }
 
+static int readahead__set_attach_target(struct bpf_program *prog)
+{
+	int err;
+
+	err = bpf_program__set_attach_target(prog, 0, "do_page_cache_ra");
+	if (!err)
+		return 0;
+
+	err = bpf_program__set_attach_target(prog, 0,
+					"__do_page_cache_readahead");
+	if (!err)
+		return 0;
+
+	fprintf(stderr, "failed to set attach target for %s: %s\n",
+		bpf_program__name(prog), strerror(-err));
+	return err;
+}
+
 int main(int argc, char **argv)
 {
 	static const struct argp argp = {
@@ -95,10 +118,32 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	obj = readahead_bpf__open_and_load();
+	obj = readahead_bpf__open();
 	if (!obj) {
-		fprintf(stderr, "failed to open and/or load BPF ojbect\n");
+		fprintf(stderr, "failed to open BPF object\n");
 		return 1;
+	}
+
+	/*
+	 * Starting from v5.10-rc1 (8238287), __do_page_cache_readahead has
+	 * renamed to do_page_cache_ra. So we specify the function dynamically.
+	 */
+	err = readahead__set_attach_target(obj->progs.do_page_cache_ra);
+	if (err)
+		goto cleanup;
+	err = readahead__set_attach_target(obj->progs.do_page_cache_ra_ret);
+	if (err)
+		goto cleanup;
+
+	err = readahead_bpf__load(obj);
+	if (err) {
+		fprintf(stderr, "failed to load BPF object\n");
+		goto cleanup;
+	}
+
+	if (!obj->bss) {
+		fprintf(stderr, "Memory-mapping BPF maps is supported starting from Linux 5.7, please upgrade.\n");
+		goto cleanup;
 	}
 
 	err = readahead_bpf__attach(obj);

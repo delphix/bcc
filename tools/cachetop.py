@@ -157,8 +157,8 @@ def handle_loop(stdscr, args):
         u32 uid = bpf_get_current_uid_gid();
 
         key.ip = PT_REGS_IP(ctx);
-        key.pid = pid & 0xFFFFFFFF;
-        key.uid = uid & 0xFFFFFFFF;
+        key.pid = pid >> 32;
+        key.uid = uid;
         bpf_get_current_comm(&(key.comm), 16);
 
         counts.increment(key);
@@ -169,8 +169,13 @@ def handle_loop(stdscr, args):
     b = BPF(text=bpf_text)
     b.attach_kprobe(event="add_to_page_cache_lru", fn_name="do_count")
     b.attach_kprobe(event="mark_page_accessed", fn_name="do_count")
-    b.attach_kprobe(event="account_page_dirtied", fn_name="do_count")
     b.attach_kprobe(event="mark_buffer_dirty", fn_name="do_count")
+
+    # Function account_page_dirtied() is changed to folio_account_dirtied() in 5.15.
+    if BPF.get_kprobe_functions(b'folio_account_dirtied'):
+        b.attach_kprobe(event="folio_account_dirtied", fn_name="do_count")
+    elif BPF.get_kprobe_functions(b'account_page_dirtied'):
+        b.attach_kprobe(event="account_page_dirtied", fn_name="do_count")
 
     exiting = 0
 

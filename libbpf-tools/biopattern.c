@@ -28,11 +28,12 @@ static struct env {
 static volatile bool exiting;
 
 const char *argp_program_version = "biopattern 0.1";
-const char *argp_program_bug_address = "<bpf@vger.kernel.org>";
+const char *argp_program_bug_address =
+	"https://github.com/iovisor/bcc/tree/master/libbpf-tools";
 const char argp_program_doc[] =
 "Show block device I/O pattern.\n"
 "\n"
-"USAGE: biopattern [--help] [-T] [-d] [interval] [count]\n"
+"USAGE: biopattern [--help] [-T] [-d DISK] [interval] [count]\n"
 "\n"
 "EXAMPLES:\n"
 "    biopattern              # show block I/O pattern\n"
@@ -44,6 +45,7 @@ static const struct argp_option opts[] = {
 	{ "timestamp", 'T', NULL, 0, "Include timestamp on output" },
 	{ "disk",  'd', "DISK",  0, "Trace this disk only" },
 	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
+	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
 	{},
 };
 
@@ -52,6 +54,9 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	static int pos_args;
 
 	switch (key) {
+	case 'h':
+		argp_state_help(state, stderr, ARGP_HELP_STD_HELP);
+		break;
 	case 'v':
 		env.verbose = true;
 		break;
@@ -178,7 +183,7 @@ int main(int argc, char **argv)
 
 	obj = biopattern_bpf__open();
 	if (!obj) {
-		fprintf(stderr, "failed to open and/or load BPF ojbect\n");
+		fprintf(stderr, "failed to open BPF object\n");
 		return 1;
 	}
 

@@ -1,6 +1,7 @@
 // Based on execsnoop(8) from BCC by Brendan Gregg and others.
 //
 #include <argp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,8 +15,11 @@
 #include "trace_helpers.h"
 
 #define PERF_BUFFER_PAGES   64
+#define PERF_POLL_TIMEOUT_MS	100
 #define NSEC_PRECISION (NSEC_PER_SEC / 1000)
 #define MAX_ARGS_KEY 259
+
+static volatile sig_atomic_t exiting = 0;
 
 static struct env {
 	bool time;
@@ -36,9 +40,10 @@ static struct env {
 static struct timespec start_time;
 
 const char *argp_program_version = "execsnoop 0.1";
-const char *argp_program_bug_address = "<bpf@vger.kernel.org>";
+const char *argp_program_bug_address =
+	"https://github.com/iovisor/bcc/tree/master/libbpf-tools";
 const char argp_program_doc[] =
-"Trace open family syscalls\n"
+"Trace exec syscalls\n"
 "\n"
 "USAGE: execsnoop [-h] [-T] [-t] [-x] [-u UID] [-q] [-n NAME] [-l LINE] [-U]\n"
 "                 [--max-args MAX_ARGS]\n"
@@ -55,17 +60,18 @@ const char argp_program_doc[] =
 "   ./execsnoop -l tpkg   # only print command where arguments contains \"tpkg\"";
 
 static const struct argp_option opts[] = {
-	{ "time", 'T', NULL, 0, "include time column on output (HH:MM:SS)"},
-	{ "timestamp", 't', NULL, 0, "include timestamp on output"},
-	{ "fails", 'x', NULL, 0, "include failed exec()s"},
-	{ "uid", 'u', "UID", 0, "trace this UID only"},
-	{ "quote", 'q', NULL, 0, "Add quotemarks (\") around arguments"},
-	{ "name", 'n', "NAME", 0, "only print commands matching this name, any arg"},
-	{ "line", 'l', "LINE", 0, "only print commands where arg contains this line"},
-	{ "print-uid", 'U', NULL, 0, "print UID column"},
+	{ "time", 'T', NULL, 0, "include time column on output (HH:MM:SS)" },
+	{ "timestamp", 't', NULL, 0, "include timestamp on output" },
+	{ "fails", 'x', NULL, 0, "include failed exec()s" },
+	{ "uid", 'u', "UID", 0, "trace this UID only" },
+	{ "quote", 'q', NULL, 0, "Add quotemarks (\") around arguments" },
+	{ "name", 'n', "NAME", 0, "only print commands matching this name, any arg" },
+	{ "line", 'l', "LINE", 0, "only print commands where arg contains this line" },
+	{ "print-uid", 'U', NULL, 0, "print UID column" },
 	{ "max-args", MAX_ARGS_KEY, "MAX_ARGS", 0,
-		"maximum number of arguments parsed and displayed, defaults to 20"},
+		"maximum number of arguments parsed and displayed, defaults to 20" },
 	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
+	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
 	{},
 };
 
@@ -75,7 +81,7 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 
 	switch (key) {
 	case 'h':
-		argp_usage(state);
+		argp_state_help(state, stderr, ARGP_HELP_STD_HELP);
 		break;
 	case 'T':
 		env.time = true;
@@ -127,12 +133,17 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	return 0;
 }
 
-int libbpf_print_fn(enum libbpf_print_level level,
-		    const char *format, va_list args)
+static int libbpf_print_fn(enum libbpf_print_level level,
+			   const char *format, va_list args)
 {
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
 	return vfprintf(stderr, format, args);
+}
+
+static void sig_int(int signo)
+{
+	exiting = 1;
 }
 
 static void time_since_start()
@@ -174,13 +185,14 @@ static void inline quoted_symbol(char c) {
 
 static void print_args(const struct event *e, bool quote)
 {
-	int args_counter = 0;
+	int i, args_counter = 0;
 
 	if (env.quote)
 		putchar('"');
 
-	for (int i = 0; i < e->args_size && args_counter < e->args_count; i++) {
+	for (i = 0; i < e->args_size && args_counter < e->args_count; i++) {
 		char c = e->args[i];
+
 		if (env.quote) {
 			if (c == '\0') {
 				args_counter++;
@@ -206,7 +218,7 @@ static void print_args(const struct event *e, bool quote)
 	}
 }
 
-void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
+static void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
 {
 	const struct event *e = data;
 	time_t t;
@@ -240,7 +252,7 @@ void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
 	putchar('\n');
 }
 
-void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
+static void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
 {
 	fprintf(stderr, "Lost %llu events on CPU #%d!\n", lost_cnt, cpu);
 }
@@ -271,7 +283,7 @@ int main(int argc, char **argv)
 
 	obj = execsnoop_bpf__open();
 	if (!obj) {
-		fprintf(stderr, "failed to open and/or load BPF object\n");
+		fprintf(stderr, "failed to open BPF object\n");
 		return 1;
 	}
 
@@ -316,10 +328,22 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
+	if (signal(SIGINT, sig_int) == SIG_ERR) {
+		fprintf(stderr, "can't set signal handler: %s\n", strerror(errno));
+		err = 1;
+		goto cleanup;
+	}
+
 	/* main: poll */
-	while ((err = perf_buffer__poll(pb, 100)) >= 0)
-		;
-	printf("Error polling perf buffer: %d\n", err);
+	while (!exiting) {
+		err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS);
+		if (err < 0 && errno != EINTR) {
+			fprintf(stderr, "error polling perf buffer: %s\n", strerror(errno));
+			goto cleanup;
+		}
+		/* reset err to return 0 if exiting */
+		err = 0;
+	}
 
 cleanup:
 	perf_buffer__free(pb);

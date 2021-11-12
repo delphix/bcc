@@ -29,7 +29,11 @@
 #include <llvm/MC/MCInstrInfo.h>
 #include <llvm/MC/MCObjectFileInfo.h>
 #include <llvm/MC/MCRegisterInfo.h>
+#if LLVM_MAJOR_VERSION >= 14
+#include <llvm/MC/TargetRegistry.h>
+#else
 #include <llvm/Support/TargetRegistry.h>
+#endif
 
 #include "bcc_debug.h"
 
@@ -128,11 +132,17 @@ void SourceDebugger::dump() {
     return;
   }
 
-  MCObjectFileInfo MOFI;
-  MCContext Ctx(MAI.get(), MRI.get(), &MOFI, nullptr);
-  MOFI.InitMCObjectFileInfo(TheTriple, false, Ctx, false);
   std::unique_ptr<MCSubtargetInfo> STI(
       T->createMCSubtargetInfo(TripleStr, "", ""));
+  MCObjectFileInfo MOFI;
+#if LLVM_MAJOR_VERSION >= 13
+  MCContext Ctx(TheTriple, MAI.get(), MRI.get(), STI.get(), nullptr);
+  Ctx.setObjectFileInfo(&MOFI);
+  MOFI.initMCObjectFileInfo(Ctx, false, false);
+#else
+  MCContext Ctx(MAI.get(), MRI.get(), &MOFI, nullptr);
+  MOFI.InitMCObjectFileInfo(TheTriple, false, Ctx, false);
+#endif
 
   std::unique_ptr<MCInstrInfo> MCII(T->createMCInstrInfo());
   MCInstPrinter *IP = T->createMCInstPrinter(TheTriple, 0, *MAI, *MCII, *MRI);

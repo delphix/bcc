@@ -77,6 +77,31 @@ ClangLoader::ClangLoader(llvm::LLVMContext *ctx, unsigned flags)
 
 ClangLoader::~ClangLoader() {}
 
+void ClangLoader::add_remapped_includes(clang::CompilerInvocation& invocation)
+{
+  // This option instructs clang whether or not to free the file buffers that we
+  // give to it. Since the embedded header files should be copied fewer times
+  // and reused if possible, set this flag to true.
+  invocation.getPreprocessorOpts().RetainRemappedFileBuffers = true;
+  for (const auto &f : remapped_headers_)
+    invocation.getPreprocessorOpts().addRemappedFile(f.first, &*f.second);
+  for (const auto &f : remapped_footers_)
+    invocation.getPreprocessorOpts().addRemappedFile(f.first, &*f.second);
+}
+
+void ClangLoader::add_main_input(clang::CompilerInvocation& invocation,
+                                 const std::string& main_path,
+                                 llvm::MemoryBuffer *main_buf)
+{
+  invocation.getPreprocessorOpts().addRemappedFile(main_path, main_buf);
+  invocation.getFrontendOpts().Inputs.clear();
+  invocation.getFrontendOpts().Inputs.push_back(
+      clang::FrontendInputFile(
+        main_path,
+        clang::FrontendOptions::getInputKindForExtension("c"))
+  );
+}
+
 namespace
 {
 
@@ -88,6 +113,16 @@ bool is_dir(const string& path)
     return false;
 
   return S_ISDIR(buf.st_mode);
+}
+
+bool is_file(const string& path)
+{
+  struct stat buf;
+
+  if (::stat (path.c_str (), &buf) < 0)
+    return false;
+
+  return S_ISREG(buf.st_mode);
 }
 
 std::pair<bool, string> get_kernel_path_info(const string kdir)
@@ -145,7 +180,10 @@ int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts,
   }
 
   // If all attempts to obtain kheaders fail, check for kheaders.tar.xz in sysfs
-  if (!is_dir(kpath)) {
+  // Checking just for kpath existence is unsufficient, since it can refer to
+  // leftover build directory without headers present anymore.
+  // See https://github.com/iovisor/bcc/pull/3588 for more details.
+  if (!is_file(kpath + "/include/linux/kconfig.h")) {
     int ret = get_proc_kheaders(tmpdir);
     if (!ret) {
       kpath = tmpdir;
@@ -194,6 +232,15 @@ int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts,
                                    "-fno-unwind-tables",
                                    "-fno-asynchronous-unwind-tables",
                                    "-x", "c", "-c", abs_file.c_str()});
+
+  const char *arch = getenv("ARCH");
+  if (!arch)
+    arch = un.machine;
+
+  if (!strncmp(arch, "mips", 4)) {
+    flags_cstr.push_back("-D__MIPSEL__");
+    flags_cstr.push_back("-D_MIPS_SZLONG=64");
+  }
 
   KBuildHelper kbuild_helper(kpath_env ? kpath : kdir, has_kpath_source);
 
@@ -253,7 +300,7 @@ int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts,
   return 0;
 }
 
-void *get_clang_target_cb(bcc_arch_t arch)
+void *get_clang_target_cb(bcc_arch_t arch, bool for_syscall)
 {
   const char *ret;
 
@@ -269,6 +316,9 @@ void *get_clang_target_cb(bcc_arch_t arch)
       break;
     case BCC_ARCH_ARM64:
       ret = "aarch64-unknown-linux-gnu";
+      break;
+    case BCC_ARCH_MIPS:
+      ret = "mips64el-unknown-linux-gnuabi64";
       break;
     default:
       ret = "x86_64-unknown-linux-gnu";
@@ -302,6 +352,8 @@ int ClangLoader::do_compile(unique_ptr<llvm::Module> *mod, TableStorage &ts,
     flags_cstr.push_back("-include");
     flags_cstr.push_back("/virtual/include/bcc/bpf.h");
   }
+  flags_cstr.push_back("-include");
+  flags_cstr.push_back("/virtual/include/bcc/bpf_workaround.h");
   flags_cstr.insert(flags_cstr.end(), flags_cstr_rem.begin(),
                     flags_cstr_rem.end());
 
@@ -318,7 +370,7 @@ int ClangLoader::do_compile(unique_ptr<llvm::Module> *mod, TableStorage &ts,
   driver::Driver drv("", target_triple, diags);
 
 #if LLVM_MAJOR_VERSION >= 4
-  if (target_triple == "x86_64-unknown-linux-gnu")
+  if (target_triple == "x86_64-unknown-linux-gnu" || target_triple == "aarch64-unknown-linux-gnu")
     flags_cstr.push_back("-fno-jump-tables");
 #endif
 
@@ -361,17 +413,10 @@ int ClangLoader::do_compile(unique_ptr<llvm::Module> *mod, TableStorage &ts,
   if (!CreateFromArgs(invocation0, ccargs, diags))
     return -1;
 
-  invocation0.getPreprocessorOpts().RetainRemappedFileBuffers = true;
-  for (const auto &f : remapped_headers_)
-    invocation0.getPreprocessorOpts().addRemappedFile(f.first, &*f.second);
-  for (const auto &f : remapped_footers_)
-    invocation0.getPreprocessorOpts().addRemappedFile(f.first, &*f.second);
+  add_remapped_includes(invocation0);
 
   if (in_memory) {
-    invocation0.getPreprocessorOpts().addRemappedFile(main_path, &*main_buf);
-    invocation0.getFrontendOpts().Inputs.clear();
-    invocation0.getFrontendOpts().Inputs.push_back(FrontendInputFile(
-        main_path, FrontendOptions::getInputKindForExtension("c")));
+    add_main_input(invocation0, main_path, &*main_buf);
   }
   invocation0.getFrontendOpts().DisableFree = false;
 
@@ -390,18 +435,8 @@ int ClangLoader::do_compile(unique_ptr<llvm::Module> *mod, TableStorage &ts,
   if (!CreateFromArgs( invocation1, ccargs, diags))
     return -1;
 
-  // This option instructs clang whether or not to free the file buffers that we
-  // give to it. Since the embedded header files should be copied fewer times
-  // and reused if possible, set this flag to true.
-  invocation1.getPreprocessorOpts().RetainRemappedFileBuffers = true;
-  for (const auto &f : remapped_headers_)
-    invocation1.getPreprocessorOpts().addRemappedFile(f.first, &*f.second);
-  for (const auto &f : remapped_footers_)
-    invocation1.getPreprocessorOpts().addRemappedFile(f.first, &*f.second);
-  invocation1.getPreprocessorOpts().addRemappedFile(main_path, &*out_buf);
-  invocation1.getFrontendOpts().Inputs.clear();
-  invocation1.getFrontendOpts().Inputs.push_back(FrontendInputFile(
-      main_path, FrontendOptions::getInputKindForExtension("c")));
+  add_remapped_includes(invocation1);
+  add_main_input(invocation1, main_path, &*out_buf);
   invocation1.getFrontendOpts().DisableFree = false;
 
   compiler1.createDiagnostics();
@@ -421,15 +456,8 @@ int ClangLoader::do_compile(unique_ptr<llvm::Module> *mod, TableStorage &ts,
   if (!CreateFromArgs(invocation2, ccargs, diags))
     return -1;
 
-  invocation2.getPreprocessorOpts().RetainRemappedFileBuffers = true;
-  for (const auto &f : remapped_headers_)
-    invocation2.getPreprocessorOpts().addRemappedFile(f.first, &*f.second);
-  for (const auto &f : remapped_footers_)
-    invocation2.getPreprocessorOpts().addRemappedFile(f.first, &*f.second);
-  invocation2.getPreprocessorOpts().addRemappedFile(main_path, &*out_buf1);
-  invocation2.getFrontendOpts().Inputs.clear();
-  invocation2.getFrontendOpts().Inputs.push_back(FrontendInputFile(
-      main_path, FrontendOptions::getInputKindForExtension("c")));
+  add_remapped_includes(invocation2);
+  add_main_input(invocation2, main_path, &*out_buf1);
   invocation2.getFrontendOpts().DisableFree = false;
   invocation2.getCodeGenOpts().DisableFree = false;
   // Resort to normal inlining. In -O0 the default is OnlyAlwaysInlining and
