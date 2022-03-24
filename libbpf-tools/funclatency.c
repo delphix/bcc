@@ -35,6 +35,7 @@ static struct prog_env {
 	unsigned int iterations;
 	bool timestamp;
 	char *funcname;
+	bool verbose;
 } env = {
 	.interval = 99999999,
 	.iterations = 99999999,
@@ -74,6 +75,7 @@ static const struct argp_option opts[] = {
 	{ "interval", 'i', "INTERVAL", 0, "Summary interval in seconds"},
 	{ "duration", 'd', "DURATION", 0, "Duration to trace"},
 	{ "timestamp", 'T', NULL, 0, "Print timestamp"},
+	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
 	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help"},
 	{},
 };
@@ -128,6 +130,9 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	case 'T':
 		env->timestamp = true;
 		break;
+	case 'v':
+		env->verbose = true;
+		break;
 	case 'h':
 		argp_state_help(state, stderr, ARGP_HELP_STD_HELP);
 		break;
@@ -155,6 +160,13 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	return 0;
 }
 
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
+{
+	if (level == LIBBPF_DEBUG && !env.verbose)
+		return 0;
+	return vfprintf(stderr, format, args);
+}
+
 static const char *unit_str(void)
 {
 	switch (env.units) {
@@ -173,20 +185,18 @@ static int attach_kprobes(struct funclatency_bpf *obj)
 {
 	long err;
 
-	obj->links.dummy_kprobe =
-		bpf_program__attach_kprobe(obj->progs.dummy_kprobe, false,
-					   env.funcname);
-	err = libbpf_get_error(obj->links.dummy_kprobe);
-	if (err) {
+	obj->links.dummy_kprobe = bpf_program__attach_kprobe(obj->progs.dummy_kprobe, false,
+							     env.funcname);
+	if (!obj->links.dummy_kprobe) {
+		err = -errno;
 		warn("failed to attach kprobe: %ld\n", err);
 		return -1;
 	}
 
-	obj->links.dummy_kretprobe =
-		bpf_program__attach_kprobe(obj->progs.dummy_kretprobe, true,
-					   env.funcname);
-	err = libbpf_get_error(obj->links.dummy_kretprobe);
-	if (err) {
+	obj->links.dummy_kretprobe = bpf_program__attach_kprobe(obj->progs.dummy_kretprobe, true,
+								env.funcname);
+	if (!obj->links.dummy_kretprobe) {
+		err = -errno;
 		warn("failed to attach kretprobe: %ld\n", err);
 		return -1;
 	}
@@ -227,8 +237,8 @@ static int attach_uprobes(struct funclatency_bpf *obj)
 	obj->links.dummy_kprobe =
 		bpf_program__attach_uprobe(obj->progs.dummy_kprobe, false,
 					   env.pid ?: -1, bin_path, func_off);
-	err = libbpf_get_error(obj->links.dummy_kprobe);
-	if (err) {
+	if (!obj->links.dummy_kprobe) {
+		err = -errno;
 		warn("Failed to attach uprobe: %ld\n", err);
 		goto out_binary;
 	}
@@ -236,8 +246,8 @@ static int attach_uprobes(struct funclatency_bpf *obj)
 	obj->links.dummy_kretprobe =
 		bpf_program__attach_uprobe(obj->progs.dummy_kretprobe, true,
 					   env.pid ?: -1, bin_path, func_off);
-	err = libbpf_get_error(obj->links.dummy_kretprobe);
-	if (err) {
+	if (!obj->links.dummy_kretprobe) {
+		err = -errno;
 		warn("Failed to attach uretprobe: %ld\n", err);
 		goto out_binary;
 	}
@@ -286,11 +296,8 @@ int main(int argc, char **argv)
 
 	sigaction(SIGINT, &sigact, 0);
 
-	err = bump_memlock_rlimit();
-	if (err) {
-		warn("failed to increase rlimit: %d\n", err);
-		return 1;
-	}
+	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
+	libbpf_set_print(libbpf_print_fn);
 
 	obj = funclatency_bpf__open();
 	if (!obj) {

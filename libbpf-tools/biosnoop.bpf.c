@@ -8,10 +8,19 @@
 
 #define MAX_ENTRIES	10240
 
+const volatile bool filter_cg = false;
 const volatile bool targ_queued = false;
-const volatile dev_t targ_dev = -1;
+const volatile bool filter_dev = false;
+const volatile __u32 targ_dev = 0;
 
 extern __u32 LINUX_KERNEL_VERSION __kconfig;
+
+struct {
+	__uint(type, BPF_MAP_TYPE_CGROUP_ARRAY);
+	__type(key, u32);
+	__type(value, u32);
+	__uint(max_entries, 1);
+} cgroup_map SEC(".maps");
 
 struct piddata {
 	char comm[TASK_COMM_LEN];
@@ -29,7 +38,7 @@ struct {
 struct stage {
 	u64 insert;
 	u64 issue;
-	dev_t dev;
+	__u32 dev;
 };
 
 struct {
@@ -60,12 +69,18 @@ int trace_pid(struct request *rq)
 SEC("fentry/blk_account_io_start")
 int BPF_PROG(blk_account_io_start, struct request *rq)
 {
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
+
 	return trace_pid(rq);
 }
 
 SEC("kprobe/blk_account_io_merge_bio")
 int BPF_KPROBE(blk_account_io_merge_bio, struct request *rq)
 {
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
+
 	return trace_pid(rq);
 }
 
@@ -81,7 +96,7 @@ int trace_rq_start(struct request *rq, bool insert)
 
 		stage.dev = disk ? MKDEV(BPF_CORE_READ(disk, major),
 				BPF_CORE_READ(disk, first_minor)) : 0;
-		if (targ_dev != -1 && targ_dev != stage.dev)
+		if (filter_dev && targ_dev != stage.dev)
 			return 0;
 		stagep = &stage;
 	}
@@ -97,6 +112,9 @@ int trace_rq_start(struct request *rq, bool insert)
 SEC("tp_btf/block_rq_insert")
 int BPF_PROG(block_rq_insert)
 {
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
+
 	/**
 	 * commit a54895fa (v5.11-rc1) changed tracepoint argument list
 	 * from TP_PROTO(struct request_queue *q, struct request *rq)
@@ -111,6 +129,9 @@ int BPF_PROG(block_rq_insert)
 SEC("tp_btf/block_rq_issue")
 int BPF_PROG(block_rq_issue)
 {
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
+
 	/**
 	 * commit a54895fa (v5.11-rc1) changed tracepoint argument list
 	 * from TP_PROTO(struct request_queue *q, struct request *rq)
@@ -126,6 +147,9 @@ SEC("tp_btf/block_rq_complete")
 int BPF_PROG(block_rq_complete, struct request *rq, int error,
 	     unsigned int nr_bytes)
 {
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
+
 	u64 ts = bpf_ktime_get_ns();
 	struct piddata *piddatap;
 	struct event event = {};

@@ -30,6 +30,7 @@ static bool emit_timestamp = false;
 static pid_t target_pid = 0;
 static bool trace_failed_only = false;
 static bool trace_by_process = true;
+static bool verbose = false;
 
 const char *argp_program_version = "exitsnoop 0.1";
 const char *argp_program_bug_address =
@@ -51,6 +52,7 @@ static const struct argp_option opts[] = {
 	{ "failed", 'x', NULL, 0, "Trace error exits only." },
 	{ "pid", 'p', "PID", 0, "Process ID to trace" },
 	{ "threaded", 'T', NULL, 0, "Trace by thread." },
+	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
 	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
 	{},
 };
@@ -78,6 +80,9 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	case 'T':
 		trace_by_process = false;
 		break;
+	case 'v':
+		verbose = true;
+		break;
 	case 'h':
 		argp_state_help(state, stderr, ARGP_HELP_STD_HELP);
 		break;
@@ -85,6 +90,13 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 		return ARGP_ERR_UNKNOWN;
 	}
 	return 0;
+}
+
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
+{
+	if (level == LIBBPF_DEBUG && !verbose)
+		return 0;
+	return vfprintf(stderr, format, args);
 }
 
 static void sig_int(int signo)
@@ -140,7 +152,6 @@ int main(int argc, char **argv)
 		.parser = parse_arg,
 		.doc = argp_program_doc,
 	};
-	struct perf_buffer_opts pb_opts;
 	struct perf_buffer *pb = NULL;
 	struct exitsnoop_bpf *obj;
 	int err;
@@ -149,11 +160,8 @@ int main(int argc, char **argv)
 	if (err)
 		return err;
 
-	err = bump_memlock_rlimit();
-	if (err) {
-		warn("failed to increase rlimit: %d\n", err);
-		return 1;
-	}
+	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
+	libbpf_set_print(libbpf_print_fn);
 
 	obj = exitsnoop_bpf__open();
 	if (!obj) {
@@ -177,11 +185,10 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
-	pb_opts.sample_cb = handle_event;
-	pb_opts.lost_cb = handle_lost_events;
-	pb = perf_buffer__new(bpf_map__fd(obj->maps.events), PERF_BUFFER_PAGES, &pb_opts);
-	err = libbpf_get_error(pb);
-	if (err) {
+	pb = perf_buffer__new(bpf_map__fd(obj->maps.events), PERF_BUFFER_PAGES,
+			      handle_event, handle_lost_events, NULL, NULL);
+	if (!pb) {
+		err = -errno;
 		warn("failed to open perf buffer: %d\n", err);
 		goto cleanup;
 	}
@@ -199,8 +206,8 @@ int main(int argc, char **argv)
 
 	while (!exiting) {
 		err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS);
-		if (err < 0 && errno != EINTR) {
-			warn("error polling perf buffer: %s\n", strerror(errno));
+		if (err < 0 && err != -EINTR) {
+			warn("error polling perf buffer: %s\n", strerror(-err));
 			goto cleanup;
 		}
 		/* reset err to return 0 if exiting */

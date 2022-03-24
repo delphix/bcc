@@ -178,7 +178,7 @@ static int trace_connect_return(struct pt_regs *ctx, short ipver)
     u16 dport = skp->__sk_common.skc_dport;
 
     FILTER_PORT
-    
+
     FILTER_FAMILY
 
     if (ipver == 4) {
@@ -295,7 +295,7 @@ int trace_udp_ret_recvmsg(struct pt_regs *ctx)
         return 0;
 
     struct msghdr *msghdr = (struct msghdr *)*msgpp;
-    if (msghdr->msg_iter.type != ITER_IOVEC)
+    if (msghdr->msg_iter.TYPE_FIELD != ITER_IOVEC)
         goto delete_and_return;
 
     int copied = (int)PT_REGS_RC(ctx);
@@ -361,6 +361,10 @@ bpf_text = bpf_text.replace('FILTER_FAMILY', '')
 bpf_text = bpf_text.replace('FILTER_UID', '')
 
 if args.dns:
+    if BPF.kernel_struct_has_field(b'iov_iter', b'iter_type') == 1:
+        dns_bpf_text = dns_bpf_text.replace('TYPE_FIELD', 'iter_type')
+    else:
+        dns_bpf_text = dns_bpf_text.replace('TYPE_FIELD', 'type')
     bpf_text += dns_bpf_text
 
 if debug or args.ebpf:
@@ -380,12 +384,12 @@ def print_ipv4_event(cpu, data, size):
         printb(b"%-6d" % event.uid, nl="")
     dest_ip = inet_ntop(AF_INET, pack("I", event.daddr)).encode()
     if args.lport:
-        printb(b"%-6d %-12.12s %-2d %-16s %-6d %-16s %-6d %s" % (event.pid,
+        printb(b"%-7d %-12.12s %-2d %-16s %-6d %-16s %-6d %s" % (event.pid,
             event.task, event.ip,
             inet_ntop(AF_INET, pack("I", event.saddr)).encode(), event.lport,
             dest_ip, event.dport, print_dns(dest_ip)))
     else:
-        printb(b"%-6d %-12.12s %-2d %-16s %-16s %-6d %s" % (event.pid,
+        printb(b"%-7d %-12.12s %-2d %-16s %-16s %-6d %s" % (event.pid,
             event.task, event.ip,
             inet_ntop(AF_INET, pack("I", event.saddr)).encode(),
             dest_ip, event.dport, print_dns(dest_ip)))
@@ -401,12 +405,12 @@ def print_ipv6_event(cpu, data, size):
         printb(b"%-6d" % event.uid, nl="")
     dest_ip = inet_ntop(AF_INET6, event.daddr).encode()
     if args.lport:
-        printb(b"%-6d %-12.12s %-2d %-16s %-6d %-16s %-6d %s" % (event.pid,
+        printb(b"%-7d %-12.12s %-2d %-16s %-6d %-16s %-6d %s" % (event.pid,
             event.task, event.ip,
             inet_ntop(AF_INET6, event.saddr).encode(), event.lport,
             dest_ip, event.dport, print_dns(dest_ip)))
     else:
-        printb(b"%-6d %-12.12s %-2d %-16s %-16s %-6d %s" % (event.pid,
+        printb(b"%-7d %-12.12s %-2d %-16s %-16s %-6d %s" % (event.pid,
             event.task, event.ip,
             inet_ntop(AF_INET6, event.saddr).encode(),
             dest_ip, event.dport, print_dns(dest_ip)))
@@ -528,10 +532,10 @@ else:
     if args.print_uid:
         print("%-6s" % ("UID"), end="")
     if args.lport:
-        print("%-6s %-12s %-2s %-16s %-6s %-16s %-6s" % ("PID", "COMM", "IP", "SADDR",
+        print("%-7s %-12s %-2s %-16s %-6s %-16s %-6s" % ("PID", "COMM", "IP", "SADDR",
             "LPORT", "DADDR", "DPORT"), end="")
     else:
-        print("%-6s %-12s %-2s %-16s %-16s %-6s" % ("PID", "COMM", "IP", "SADDR",
+        print("%-7s %-12s %-2s %-16s %-16s %-6s" % ("PID", "COMM", "IP", "SADDR",
             "DADDR", "DPORT"), end="")
     if args.dns:
         print(" QUERY")

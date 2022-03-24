@@ -4,7 +4,7 @@
 # biolatency    Summarize block device I/O latency as a histogram.
 #       For Linux, uses BCC, eBPF.
 #
-# USAGE: biolatency [-h] [-T] [-Q] [-m] [-D] [-e] [interval] [count]
+# USAGE: biolatency [-h] [-T] [-Q] [-m] [-D] [-F] [-e] [-j] [interval] [count]
 #
 # Copyright (c) 2015 Brendan Gregg.
 # Licensed under the Apache License, Version 2.0 (the "License")
@@ -64,7 +64,7 @@ if args.flags and args.disks:
 # define BPF program
 bpf_text = """
 #include <uapi/linux/ptrace.h>
-#include <linux/blkdev.h>
+#include <linux/blk-mq.h>
 
 typedef struct disk_key {
     char disk[DISK_NAME_LEN];
@@ -128,12 +128,16 @@ storage_str = ""
 store_str = ""
 if args.disks:
     storage_str += "BPF_HISTOGRAM(dist, disk_key_t);"
-    store_str += """
+    disks_str = """
     disk_key_t key = {.slot = bpf_log2l(delta)};
-    void *__tmp = (void *)req->rq_disk->disk_name;
+    void *__tmp = (void *)req->__RQ_DISK__->disk_name;
     bpf_probe_read(&key.disk, sizeof(key.disk), __tmp);
     dist.atomic_increment(key);
     """
+    if BPF.kernel_struct_has_field(b'request', b'rq_disk'):
+        store_str += disks_str.replace('__RQ_DISK__', 'rq_disk')
+    else:
+        store_str += disks_str.replace('__RQ_DISK__', 'q->disk')
 elif args.flags:
     storage_str += "BPF_HISTOGRAM(dist, flag_key_t);"
     store_str += """
@@ -168,16 +172,27 @@ if debug or args.ebpf:
 # load BPF program
 b = BPF(text=bpf_text)
 if args.queued:
-    b.attach_kprobe(event="blk_account_io_start", fn_name="trace_req_start")
+    if BPF.get_kprobe_functions(b'__blk_account_io_start'):
+        b.attach_kprobe(event="__blk_account_io_start", fn_name="trace_req_start")
+    else:
+        b.attach_kprobe(event="blk_account_io_start", fn_name="trace_req_start")
 else:
     if BPF.get_kprobe_functions(b'blk_start_request'):
         b.attach_kprobe(event="blk_start_request", fn_name="trace_req_start")
     b.attach_kprobe(event="blk_mq_start_request", fn_name="trace_req_start")
-b.attach_kprobe(event="blk_account_io_done",
-    fn_name="trace_req_done")
+if BPF.get_kprobe_functions(b'__blk_account_io_done'):
+    b.attach_kprobe(event="__blk_account_io_done", fn_name="trace_req_done")
+else:
+    b.attach_kprobe(event="blk_account_io_done", fn_name="trace_req_done")
 
 if not args.json:
     print("Tracing block device I/O... Hit Ctrl-C to end.")
+
+def disk_print(s):
+    disk = s.decode('utf-8', 'replace')
+    if not disk:
+        disk = "<unknown>"
+    return disk
 
 # see blk_fill_rwbs():
 req_opf = {
@@ -247,9 +262,8 @@ while (1):
 
         if args.flags:
             dist.print_json_hist(label, "flags", flags_print)
-
         else:
-            dist.print_json_hist(label)
+            dist.print_json_hist(label, "disk", disk_print)
 
     else:
         if args.timestamp:
@@ -258,7 +272,7 @@ while (1):
         if args.flags:
             dist.print_log2_hist(label, "flags", flags_print)
         else:
-            dist.print_log2_hist(label, "disk")
+            dist.print_log2_hist(label, "disk", disk_print)
         if args.extension:
             total = extension[0].total
             counts = extension[0].count
@@ -277,4 +291,3 @@ while (1):
     countdown -= 1
     if exiting or countdown == 0:
         exit()
-

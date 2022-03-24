@@ -11,11 +11,20 @@
 
 extern int LINUX_KERNEL_VERSION __kconfig;
 
+const volatile bool filter_cg = false;
 const volatile bool targ_per_disk = false;
 const volatile bool targ_per_flag = false;
 const volatile bool targ_queued = false;
 const volatile bool targ_ms = false;
-const volatile dev_t targ_dev = -1;
+const volatile bool filter_dev = false;
+const volatile __u32 targ_dev = 0;
+
+struct {
+	__uint(type, BPF_MAP_TYPE_CGROUP_ARRAY);
+	__type(key, u32);
+	__type(value, u32);
+	__uint(max_entries, 1);
+} cgroup_map SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -43,9 +52,9 @@ int trace_rq_start(struct request *rq, int issue)
 
 	u64 ts = bpf_ktime_get_ns();
 
-	if (targ_dev != -1) {
+	if (filter_dev) {
 		struct gendisk *disk = BPF_CORE_READ(rq, rq_disk);
-		dev_t dev;
+		u32 dev;
 
 		dev = disk ? MKDEV(BPF_CORE_READ(disk, major),
 				BPF_CORE_READ(disk, first_minor)) : 0;
@@ -59,6 +68,9 @@ int trace_rq_start(struct request *rq, int issue)
 SEC("tp_btf/block_rq_insert")
 int block_rq_insert(u64 *ctx)
 {
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
+
 	/**
 	 * commit a54895fa (v5.11-rc1) changed tracepoint argument list
 	 * from TP_PROTO(struct request_queue *q, struct request *rq)
@@ -73,6 +85,9 @@ int block_rq_insert(u64 *ctx)
 SEC("tp_btf/block_rq_issue")
 int block_rq_issue(u64 *ctx)
 {
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
+
 	/**
 	 * commit a54895fa (v5.11-rc1) changed tracepoint argument list
 	 * from TP_PROTO(struct request_queue *q, struct request *rq)
@@ -88,6 +103,9 @@ SEC("tp_btf/block_rq_complete")
 int BPF_PROG(block_rq_complete, struct request *rq, int error,
 	unsigned int nr_bytes)
 {
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
+
 	u64 slot, *tsp, ts = bpf_ktime_get_ns();
 	struct hist_key hkey = {};
 	struct hist *histp;

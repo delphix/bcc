@@ -86,8 +86,7 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	return 0;
 }
 
-int libbpf_print_fn(enum libbpf_print_level level,
-		    const char *format, va_list args)
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
@@ -140,18 +139,32 @@ int main(int argc, char **argv)
 	if (err)
 		return err;
 
+	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
 	libbpf_set_print(libbpf_print_fn);
 
-	err = bump_memlock_rlimit();
-	if (err) {
-		fprintf(stderr, "failed to increase rlimit: %d\n", err);
+	obj = cachestat_bpf__open();
+	if (!obj) {
+		fprintf(stderr, "failed to open BPF object\n");
 		return 1;
 	}
 
-	obj = cachestat_bpf__open_and_load();
-	if (!obj) {
-		fprintf(stderr, "failed to open and/or load BPF object\n");
-		return 1;
+	/**
+	 * account_page_dirtied was renamed to folio_account_dirtied
+	 * in kernel commit 203a31516616 ("mm/writeback: Add __folio_mark_dirty()")
+	 */
+	if (fentry_exists("folio_account_dirtied", NULL)) {
+		err = bpf_program__set_attach_target(obj->progs.account_page_dirtied, 0,
+						     "folio_account_dirtied");
+		if (err) {
+			fprintf(stderr, "failed to set attach target\n");
+			goto cleanup;
+		}
+	}
+
+	err = cachestat_bpf__load(obj);
+	if (err) {
+		fprintf(stderr, "failed to load BPF object\n");
+		goto cleanup;
 	}
 
 	if (!obj->bss) {

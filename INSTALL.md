@@ -235,11 +235,9 @@ sudo yum install bcc
 
 ## Amazon Linux 2 - Binary
 Use case 1. Install BCC for your AMI's default kernel (no reboot required):
-   Tested on Amazon Linux AMI release 2020.03 (kernel 4.14.154-128.181.amzn2.x86_64)
+   Tested on Amazon Linux AMI release 2021.11 (kernel 5.10.75-79.358.amzn2.x86_64)
 ```
-sudo amazon-linux-extras enable BCC
-sudo yum install kernel-devel-$(uname -r)
-sudo yum install bcc
+sudo amazon-linux-extras install BCC
 ```
 
 ## Alpine - Binary
@@ -342,6 +340,9 @@ sudo apt-get -y install bison build-essential cmake flex git libedit-dev \
 # For Eoan (19.10) or Focal (20.04.1 LTS)
 sudo apt install -y bison build-essential cmake flex git libedit-dev \
   libllvm7 llvm-7-dev libclang-7-dev python zlib1g-dev libelf-dev libfl-dev python3-distutils
+  
+# For Hirsute (21.04)  or Impish (21.10)
+sudo apt install -y bison build-essential cmake flex git libedit-dev   libllvm11 llvm-11-dev libclang-11-dev python zlib1g-dev libelf-dev libfl-dev python3-distutils
 
 # For other versions
 sudo apt-get -y install bison build-essential cmake flex git libedit-dev \
@@ -364,6 +365,56 @@ pushd src/python/
 make
 sudo make install
 popd
+```
+
+## CentOS-8.5 - Source
+suppose you're running with root or add sudo first
+
+### Install build dependencies
+```
+dnf install -y bison cmake ethtool flex git iperf3 libstdc++-devel python3-netaddr python3-pip gcc gcc-c++ make zlib-devel elfutils-libelf-devel
+# dnf install -y luajit luajit-devel ## if use luajit, will report some lua function(which in lua5.3) undefined problem 
+dnf install -y clang clang-devel llvm llvm-devel llvm-static ncurses-devel
+dnf -y install netperf
+pip3 install pyroute2
+ln -s /usr/bin/python3 /usr/bin/python
+```
+### Install and Compile bcc
+```
+git clone https://github.com/iovisor/bcc.git
+
+mkdir bcc-build
+cd bcc-build/
+
+## here llvm should always link shared library
+cmake ../bcc -DCMAKE_INSTALL_PREFIX=/usr -DENABLE_LLVM_SHARED=1  
+make -j10
+make install 
+
+```
+after install, you may add bcc directory to your $PATH, which you can add to ~/.bashrc
+```
+bcctools=/usr/share/bcc/tools
+bccexamples=/usr/share/bcc/examples
+export PATH=$bcctools:$bccexamples:$PATH
+```
+### let path take effect
+```
+source ~/.bashrc 
+```
+then run 
+```
+hello_world.py
+```
+Or 
+```
+cd /usr/share/bcc/examples
+./hello_world.py
+./tracing/bitehist.py
+
+cd /usr/share/bcc/tools
+./bitesize 
+
 ```
 
 ## Fedora - Source

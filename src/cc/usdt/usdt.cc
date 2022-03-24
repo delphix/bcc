@@ -175,6 +175,11 @@ bool Probe::usdt_getarg(std::ostream &stream, const std::string& probe_func) {
   if (arg_count == 0)
     return true;
 
+  uint64_t page_size = sysconf(_SC_PAGESIZE);
+  std::unordered_set<int> page_offsets;
+  for (Location &location : locations_)
+    page_offsets.insert(location.address_ % page_size);
+
   for (size_t arg_n = 0; arg_n < arg_count; ++arg_n) {
     std::string ctype = largest_arg_type(arg_n);
     std::string cptr = tfm::format("*((%s *)dest)", ctype);
@@ -193,15 +198,22 @@ bool Probe::usdt_getarg(std::ostream &stream, const std::string& probe_func) {
         return false;
       stream << "\n  return 0;\n}\n";
     } else {
-      stream << "  switch(PT_REGS_IP(ctx)) {\n";
+      if (page_offsets.size() == locations_.size())
+        tfm::format(stream, "  switch (PT_REGS_IP(ctx) %% 0x%xULL) {\n", page_size);
+      else
+        stream << "  switch (PT_REGS_IP(ctx)) {\n";
       for (Location &location : locations_) {
-        uint64_t global_address;
+        if (page_offsets.size() == locations_.size()) {
+          tfm::format(stream, "  case 0x%xULL: ", location.address_ % page_size);
+        } else {
+          uint64_t global_address;
 
-        if (!resolve_global_address(&global_address, location.bin_path_,
-                                    location.address_))
-          return false;
+          if (!resolve_global_address(&global_address, location.bin_path_,
+                                      location.address_))
+            return false;
 
-        tfm::format(stream, "  case 0x%xULL: ", global_address);
+          tfm::format(stream, "  case 0x%xULL: ", global_address);
+        }
         if (!location.arguments_[arg_n].assign_to_local(stream, cptr, location.bin_path_,
                                                         pid_))
           return false;
@@ -220,9 +232,13 @@ void Probe::add_location(uint64_t addr, const std::string &bin_path, const char 
 }
 
 void Probe::finalize_locations() {
+  // The following comparator needs to establish a strict weak ordering relation. Such
+  // that when x < y == true, y < x == false. Otherwise it leads to undefined behavior.
+  // To guarantee this, it uses std::tie which allows the lambda to have a lexicographical
+  // comparison and hence, guarantee the strict weak ordering.
   std::sort(locations_.begin(), locations_.end(),
             [](const Location &a, const Location &b) {
-              return a.bin_path_ < b.bin_path_ || a.address_ < b.address_;
+              return std::tie(a.bin_path_, a.address_) < std::tie(b.bin_path_, b.address_);
             });
   auto last = std::unique(locations_.begin(), locations_.end(),
                           [](const Location &a, const Location &b) {

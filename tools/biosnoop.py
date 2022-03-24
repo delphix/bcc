@@ -37,7 +37,7 @@ debug = 0
 # define BPF program
 bpf_text="""
 #include <uapi/linux/ptrace.h>
-#include <linux/blkdev.h>
+#include <linux/blk-mq.h>
 
 // for saving the timestamp and __data_len of each request
 struct start_req_t {
@@ -125,7 +125,7 @@ int trace_req_completion(struct pt_regs *ctx, struct request *req)
         data.pid = valp->pid;
         data.sector = req->__sector;
         bpf_probe_read_kernel(&data.name, sizeof(data.name), valp->name);
-        struct gendisk *rq_disk = req->rq_disk;
+        struct gendisk *rq_disk = req->__RQ_DISK__;
         bpf_probe_read_kernel(&data.disk_name, sizeof(data.disk_name),
                        rq_disk->disk_name);
     }
@@ -156,6 +156,10 @@ if args.queue:
     bpf_text = bpf_text.replace('##QUEUE##', '1')
 else:
     bpf_text = bpf_text.replace('##QUEUE##', '0')
+if BPF.kernel_struct_has_field(b'request', b'rq_disk'):
+    bpf_text = bpf_text.replace('__RQ_DISK__', 'rq_disk')
+else:
+    bpf_text = bpf_text.replace('__RQ_DISK__', 'q->disk')
 if debug or args.ebpf:
     print(bpf_text)
     if args.ebpf:
@@ -163,15 +167,20 @@ if debug or args.ebpf:
 
 # initialize BPF
 b = BPF(text=bpf_text)
-b.attach_kprobe(event="blk_account_io_start", fn_name="trace_pid_start")
+if BPF.get_kprobe_functions(b'__blk_account_io_start'):
+    b.attach_kprobe(event="__blk_account_io_start", fn_name="trace_pid_start")
+else:
+    b.attach_kprobe(event="blk_account_io_start", fn_name="trace_pid_start")
 if BPF.get_kprobe_functions(b'blk_start_request'):
     b.attach_kprobe(event="blk_start_request", fn_name="trace_req_start")
 b.attach_kprobe(event="blk_mq_start_request", fn_name="trace_req_start")
-b.attach_kprobe(event="blk_account_io_done",
-    fn_name="trace_req_completion")
+if BPF.get_kprobe_functions(b'__blk_account_io_done'):
+    b.attach_kprobe(event="__blk_account_io_done", fn_name="trace_req_completion")
+else:
+    b.attach_kprobe(event="blk_account_io_done", fn_name="trace_req_completion")
 
 # header
-print("%-11s %-14s %-6s %-7s %-1s %-10s %-7s" % ("TIME(s)", "COMM", "PID",
+print("%-11s %-14s %-7s %-9s %-1s %-10s %-7s" % ("TIME(s)", "COMM", "PID",
     "DISK", "T", "SECTOR", "BYTES"), end="")
 if args.queue:
     print("%7s " % ("QUE(ms)"), end="")
@@ -197,10 +206,13 @@ def print_event(cpu, data, size):
 
     delta = float(event.ts) - start_ts
 
-    print("%-11.6f %-14.14s %-6s %-7s %-1s %-10s %-7s" % (
+    disk_name = event.disk_name.decode('utf-8', 'replace')
+    if not disk_name:
+        disk_name = '<unknown>'
+
+    print("%-11.6f %-14.14s %-7s %-9s %-1s %-10s %-7s" % (
         delta / 1000000, event.name.decode('utf-8', 'replace'), event.pid,
-        event.disk_name.decode('utf-8', 'replace'), rwflg, event.sector,
-        event.len), end="")
+        disk_name, rwflg, event.sector, event.len), end="")
     if args.queue:
         print("%7.2f " % (float(event.qdelta) / 1000000), end="")
     print("%7.2f" % (float(event.delta) / 1000000))

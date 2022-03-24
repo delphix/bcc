@@ -109,6 +109,12 @@ struct _name##_table_t { \
   void (*increment) (_key_type, ...); \
   void (*atomic_increment) (_key_type, ...); \
   int (*get_stackid) (void *, u64); \
+  void * (*sk_storage_get) (void *, void *, int); \
+  int (*sk_storage_delete) (void *); \
+  void * (*inode_storage_get) (void *, void *, int); \
+  int (*inode_storage_delete) (void *); \
+  void * (*task_storage_get) (void *, void *, int); \
+  int (*task_storage_delete) (void *); \
   u32 max_entries; \
   int flags; \
 }; \
@@ -164,8 +170,17 @@ struct _name##_table_t __##_name
 #define BPF_TABLE(_table_type, _key_type, _leaf_type, _name, _max_entries) \
 BPF_F_TABLE(_table_type, _key_type, _leaf_type, _name, _max_entries, 0)
 
-#define BPF_TABLE_PINNED(_table_type, _key_type, _leaf_type, _name, _max_entries, _pinned) \
-BPF_TABLE(_table_type ":" _pinned, _key_type, _leaf_type, _name, _max_entries)
+#define BPF_TABLE_PINNED7(_table_type, _key_type, _leaf_type, _name, _max_entries, _pinned, _flags) \
+  BPF_F_TABLE(_table_type ":" _pinned, _key_type, _leaf_type, _name, _max_entries, _flags)
+
+#define BPF_TABLE_PINNED6(_table_type, _key_type, _leaf_type, _name, _max_entries, _pinned) \
+  BPF_F_TABLE(_table_type ":" _pinned, _key_type, _leaf_type, _name, _max_entries, 0)
+
+#define BPF_TABLE_PINNEDX(_1, _2, _3, _4, _5, _6, _7, NAME, ...) NAME
+
+// Define a pinned table with optional flags argument
+#define BPF_TABLE_PINNED(...) \
+  BPF_TABLE_PINNEDX(__VA_ARGS__, BPF_TABLE_PINNED7, BPF_TABLE_PINNED6)(__VA_ARGS__)
 
 // define a table same as above but allow it to be referenced by other modules
 #define BPF_TABLE_PUBLIC(_table_type, _key_type, _leaf_type, _name, _max_entries) \
@@ -411,6 +426,30 @@ struct _name##_table_t { \
   u32 flags; \
 }; \
 __attribute__((section("maps/sk_storage"))) \
+struct _name##_table_t _name = { .flags = BPF_F_NO_PREALLOC }; \
+BPF_ANNOTATE_KV_PAIR(_name, int, _leaf_type)
+
+#define BPF_INODE_STORAGE(_name, _leaf_type) \
+struct _name##_table_t { \
+  int key; \
+  _leaf_type leaf; \
+  void * (*inode_storage_get) (void *, void *, int); \
+  int (*inode_storage_delete) (void *); \
+  u32 flags; \
+}; \
+__attribute__((section("maps/inode_storage"))) \
+struct _name##_table_t _name = { .flags = BPF_F_NO_PREALLOC }; \
+BPF_ANNOTATE_KV_PAIR(_name, int, _leaf_type)
+
+#define BPF_TASK_STORAGE(_name, _leaf_type) \
+struct _name##_table_t { \
+  int key; \
+  _leaf_type leaf; \
+  void * (*task_storage_get) (void *, void *, int); \
+  int (*task_storage_delete) (void *); \
+  u32 flags; \
+}; \
+__attribute__((section("maps/task_storage"))) \
 struct _name##_table_t _name = { .flags = BPF_F_NO_PREALLOC }; \
 BPF_ANNOTATE_KV_PAIR(_name, int, _leaf_type)
 
@@ -914,6 +953,34 @@ static long (*bpf_trace_vprintk)(const char *fmt, __u32 fmt_size, const void *da
   (void *)BPF_FUNC_trace_vprintk;
 static struct unix_sock *(*bpf_skc_to_unix_sock)(void *sk) =
   (void *)BPF_FUNC_skc_to_unix_sock;
+static long (*bpf_kallsyms_lookup_name)(const char *name, int name_sz, int flags,
+				__u64 *res) =
+  (void *)BPF_FUNC_kallsyms_lookup_name;
+static long (*bpf_find_vma)(struct task_struct *task, __u64 addr, void *callback_fn,
+			    void *callback_ctx, __u64 flags) =
+  (void *)BPF_FUNC_find_vma;
+static long (*bpf_loop)(__u32 nr_loops, void *callback_fn, void *callback_ctx, __u64 flags) =
+  (void *)BPF_FUNC_loop;
+static long (*bpf_strncmp)(const char *s1, __u32 s1_sz, const char *s2) =
+  (void *)BPF_FUNC_strncmp;
+static long (*bpf_get_func_arg)(void *ctx, __u32 n, __u64 *value) =
+  (void *)BPF_FUNC_get_func_arg;
+static long (*bpf_get_func_ret)(void *ctx, __u64 *value) = (void *)BPF_FUNC_get_func_ret;
+static long (*bpf_get_func_arg_cnt)(void *ctx) = (void *)BPF_FUNC_get_func_arg_cnt;
+static int (*bpf_get_retval)(void) = (void *)BPF_FUNC_get_retval;
+static int (*bpf_set_retval)(int retval) = (void *)BPF_FUNC_set_retval;
+static __u64 (*bpf_xdp_get_buff_len)(struct xdp_md *xdp_md) = (void *)BPF_FUNC_xdp_get_buff_len;
+static long (*bpf_xdp_load_bytes)(struct xdp_md *xdp_md, __u32 offset, void *buf, __u32 len) =
+  (void *)BPF_FUNC_xdp_load_bytes;
+static long (*bpf_xdp_store_bytes)(struct xdp_md *xdp_md, __u32 offset, void *buf, __u32 len) =
+  (void *)BPF_FUNC_xdp_store_bytes;
+static long (*bpf_copy_from_user_task)(void *dst, __u32 size, const void *user_ptr,
+				       struct task_struct *tsk, __u64 flags) =
+  (void *)BPF_FUNC_copy_from_user_task;
+static long (*bpf_skb_set_tstamp)(struct __sk_buff *skb, __u64 tstamp, __u32 tstamp_type) =
+  (void *)BPF_FUNC_skb_set_tstamp;
+static long (*bpf_ima_file_hash)(struct file *file, void *dst, __u32 size) =
+  (void *)BPF_FUNC_ima_file_hash;
 
 /* llvm builtin functions that eBPF C program may use to
  * emit BPF_LD_ABS and BPF_LD_IND instructions
@@ -1341,14 +1408,20 @@ static int ____##name(unsigned long long *ctx, ##args)
         do {                                                              \
             unsigned short __offset = args->data_loc_##field & 0xFFFF;    \
             bpf_probe_read((void *)dst, length, (char *)args + __offset); \
-        } while (0);
+        } while (0)
 
 #define TP_DATA_LOC_READ(dst, field)                                        \
         do {                                                                \
             unsigned short __offset = args->data_loc_##field & 0xFFFF;      \
             unsigned short __length = args->data_loc_##field >> 16;         \
             bpf_probe_read((void *)dst, __length, (char *)args + __offset); \
-        } while (0);
+        } while (0)
+
+#define TP_DATA_LOC_READ_STR(dst, field, length)                                \
+        do {                                                                    \
+            unsigned short __offset = args->data_loc_##field & 0xFFFF;          \
+            bpf_probe_read_str((void *)dst, length, (char *)args + __offset);   \
+        } while (0)
 
 #endif
 )********"

@@ -51,8 +51,7 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	return 0;
 }
 
-int libbpf_print_fn(enum libbpf_print_level level,
-		    const char *format, va_list args)
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
@@ -81,20 +80,15 @@ int main(int argc, char **argv)
 	if (err)
 		return err;
 
+	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
 	libbpf_set_print(libbpf_print_fn);
-
-	err = bump_memlock_rlimit();
-	if (err) {
-		fprintf(stderr, "failed to increase rlimit: %d\n", err);
-		return 1;
-	}
 
 	obj = numamove_bpf__open_and_load();
 	if (!obj) {
 		fprintf(stderr, "failed to open and/or load BPF object\n");
 		return 1;
 	}
-	
+
 	if (!obj->bss) {
 		fprintf(stderr, "Memory-mapping BPF maps is supported starting from Linux 5.7, please upgrade.\n");
 		goto cleanup;
@@ -108,18 +102,15 @@ int main(int argc, char **argv)
 
 	signal(SIGINT, sig_handler);
 
-	printf("%-10s %18s %18s\n", "TIME", "NUMA_migrations",
-		"NUMA_migrations_ms");
+	printf("%-10s %18s %18s\n", "TIME", "NUMA_migrations", "NUMA_migrations_ms");
 	while (!exiting) {
 		sleep(1);
 		time(&t);
 		tm = localtime(&t);
 		strftime(ts, sizeof(ts), "%H:%M:%S", tm);
 		printf("%-10s %18lld %18lld\n", ts,
-			__atomic_exchange_n(&obj->bss->num, 0,
-					__ATOMIC_RELAXED),
-			__atomic_exchange_n(&obj->bss->latency, 0,
-					__ATOMIC_RELAXED));
+			__atomic_exchange_n(&obj->bss->num, 0, __ATOMIC_RELAXED),
+			__atomic_exchange_n(&obj->bss->latency, 0, __ATOMIC_RELAXED));
 	}
 
 cleanup:

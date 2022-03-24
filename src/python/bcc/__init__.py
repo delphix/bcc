@@ -36,7 +36,7 @@ try:
 except NameError:  # Python 3
     basestring = str
 
-_probe_limit = 1000
+_default_probe_limit = 1000
 _num_open_probes = 0
 
 # for tests
@@ -449,32 +449,28 @@ class BPF(object):
             src_file = BPF._find_file(src_file)
             hdr_file = BPF._find_file(hdr_file)
 
-        # files that end in ".b" are treated as B files. Everything else is a (BPF-)C file
-        if src_file.endswith(b".b"):
-            self.module = lib.bpf_module_create_b(src_file, hdr_file, self.debug, device)
-        else:
-            if src_file:
-                # Read the BPF C source file into the text variable. This ensures,
-                # that files and inline text are treated equally.
-                with open(src_file, mode="rb") as file:
-                    text = file.read()
+        if src_file:
+            # Read the BPF C source file into the text variable. This ensures,
+            # that files and inline text are treated equally.
+            with open(src_file, mode="rb") as file:
+                text = file.read()
 
-            ctx_array = (ct.c_void_p * len(usdt_contexts))()
-            for i, usdt in enumerate(usdt_contexts):
-                ctx_array[i] = ct.c_void_p(usdt.get_context())
-            usdt_text = lib.bcc_usdt_genargs(ctx_array, len(usdt_contexts))
-            if usdt_text is None:
-                raise Exception("can't generate USDT probe arguments; " +
-                                "possible cause is missing pid when a " +
-                                "probe in a shared object has multiple " +
-                                "locations")
-            text = usdt_text + text
+        ctx_array = (ct.c_void_p * len(usdt_contexts))()
+        for i, usdt in enumerate(usdt_contexts):
+            ctx_array[i] = ct.c_void_p(usdt.get_context())
+        usdt_text = lib.bcc_usdt_genargs(ctx_array, len(usdt_contexts))
+        if usdt_text is None:
+            raise Exception("can't generate USDT probe arguments; " +
+                            "possible cause is missing pid when a " +
+                            "probe in a shared object has multiple " +
+                            "locations")
+        text = usdt_text + text
 
 
-            self.module = lib.bpf_module_create_c_from_string(text,
-                                                              self.debug,
-                                                              cflags_array, len(cflags_array),
-                                                              allow_rlimit, device)
+        self.module = lib.bpf_module_create_c_from_string(text,
+                                                          self.debug,
+                                                          cflags_array, len(cflags_array),
+                                                          allow_rlimit, device)
         if not self.module:
             raise Exception("Failed to compile BPF module %s" % (src_file or "<text>"))
 
@@ -741,6 +737,10 @@ class BPF(object):
                 # non-attachable.
                 elif fn.startswith(b'__perf') or fn.startswith(b'perf_'):
                     continue
+                # Exclude all static functions with prefix __SCT__, they are
+                # all non-attachable
+                elif fn.startswith(b'__SCT__'):
+                    continue
                 # Exclude all gcc 8's extra .cold functions
                 elif re.match(b'^.*\.cold(\.\d+)?$', fn):
                     continue
@@ -751,8 +751,16 @@ class BPF(object):
 
     def _check_probe_quota(self, num_new_probes):
         global _num_open_probes
-        if _num_open_probes + num_new_probes > _probe_limit:
+        if _num_open_probes + num_new_probes > BPF.get_probe_limit():
             raise Exception("Number of open probes would exceed global quota")
+
+    @staticmethod
+    def get_probe_limit():
+        env_probe_limit = os.environ.get('BCC_PROBE_LIMIT')
+        if env_probe_limit and env_probe_limit.isdigit():
+            return int(env_probe_limit)
+        else:
+            return _default_probe_limit
 
     def _add_kprobe_fd(self, ev_name, fn_name, fd):
         global _num_open_probes
@@ -949,7 +957,8 @@ class BPF(object):
             ct.cast(None, ct.POINTER(bcc_symbol_option)),
             ct.byref(sym),
         ) < 0:
-            raise Exception("could not determine address of symbol %s" % symname)
+            raise Exception("could not determine address of symbol %s in %s"
+                            % (symname.decode(), module.decode()))
         new_addr = sym.offset + sym_off
         module_path = ct.cast(sym.module, ct.c_char_p).value
         lib.bcc_procutils_free(sym.module)
@@ -1658,6 +1667,18 @@ class BPF(object):
         for i, v in enumerate(self.perf_buffers.values()):
             readers[i] = v
         lib.perf_reader_poll(len(readers), readers, timeout)
+
+    def perf_buffer_consume(self):
+        """perf_buffer_consume(self)
+
+        Consume all open perf buffers, regardless of whether or not
+        they currently contain events data. Necessary to catch 'remainder'
+        events when wakeup_events > 1 is set in open_perf_buffer
+        """
+        readers = (ct.c_void_p * len(self.perf_buffers))()
+        for i, v in enumerate(self.perf_buffers.values()):
+            readers[i] = v
+        lib.perf_reader_consume(len(readers), readers)
 
     def kprobe_poll(self, timeout = -1):
         """kprobe_poll(self)

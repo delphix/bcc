@@ -35,6 +35,12 @@ enum bpf_probe_attach_type {
 	BPF_PROBE_RETURN
 };
 
+struct bcc_perf_buffer_opts {
+  int pid;
+  int cpu;
+  int wakeup_events;
+};
+
 int bcc_create_map(enum bpf_map_type map_type, const char *name,
                    int key_size, int value_size, int max_entries,
                    int map_flags);
@@ -107,6 +113,10 @@ void * bpf_open_perf_buffer(perf_reader_raw_cb raw_cb,
                             perf_reader_lost_cb lost_cb, void *cb_cookie,
                             int pid, int cpu, int page_cnt);
 
+void * bpf_open_perf_buffer_opts(perf_reader_raw_cb raw_cb,
+                            perf_reader_lost_cb lost_cb, void *cb_cookie,
+                            int page_cnt, struct bcc_perf_buffer_opts *opts);
+
 /* attached a prog expressed by progfd to the device specified in dev_name */
 int bpf_attach_xdp(const char *dev_name, int progfd, uint32_t flags);
 
@@ -151,6 +161,12 @@ int bcc_iter_attach(int prog_fd, union bpf_iter_link_info *link_info,
 int bcc_iter_create(int link_fd);
 int bcc_make_parent_dir(const char *path);
 int bcc_check_bpffs_path(const char *path);
+int bpf_lookup_batch(int fd, __u32 *in_batch, __u32 *out_batch, void *keys,
+                     void *values, __u32 *count);
+int bpf_delete_batch(int fd,  void *keys, __u32 *count);
+int bpf_update_batch(int fd, void *keys, void *values, __u32 *count);
+int bpf_lookup_and_delete_batch(int fd, __u32 *in_batch, __u32 *out_batch,
+                                void *keys, void *values, __u32 *count);
 
 #define LOG_BUF_SIZE 65536
 
