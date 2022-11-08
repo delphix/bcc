@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 #
 # offcputime    Summarize off-CPU time by stack trace
 #               For Linux, uses BCC, eBPF.
@@ -116,8 +116,8 @@ bpf_text = """
 #define MAXBLOCK_US    MAXBLOCK_US_VALUEULL
 
 struct key_t {
-    u64 pid;
-    u64 tgid;
+    u32 pid;
+    u32 tgid;
     int user_stack_id;
     int kernel_stack_id;
     char name[TASK_COMM_LEN];
@@ -246,12 +246,13 @@ need_delimiter = args.delimited and not (args.kernel_stacks_only or
 if args.kernel_threads_only and args.user_stacks_only:
     print("ERROR: Displaying user stacks for kernel threads " +
           "doesn't make sense.", file=stderr)
-    exit(1)
+    exit(2)
 
 if debug or args.ebpf:
     print(bpf_text)
     if args.ebpf:
-        exit()
+        print("ERROR: Exiting")
+        exit(3)
 
 # initialize BPF
 b = BPF(text=bpf_text)
@@ -260,7 +261,7 @@ b.attach_kprobe(event_re="^finish_task_switch$|^finish_task_switch\.isra\.\d$",
 matched = b.num_open_kprobes()
 if matched == 0:
     print("error: 0 functions traced. Exiting.", file=stderr)
-    exit(1)
+    exit(4)
 
 # header
 if not folded:

@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 #
 # memleak   Trace and display outstanding allocations to detect
 #           memory leaks in user-mode processes and the kernel.
@@ -272,6 +272,19 @@ int realloc_exit(struct pt_regs *ctx) {
         return gen_alloc_exit(ctx);
 }
 
+int mmap_enter(struct pt_regs *ctx) {
+        size_t size = (size_t)PT_REGS_PARM2(ctx);
+        return gen_alloc_enter(ctx, size);
+}
+
+int mmap_exit(struct pt_regs *ctx) {
+        return gen_alloc_exit(ctx);
+}
+
+int munmap_enter(struct pt_regs *ctx, void *address) {
+        return gen_free_enter(ctx, address);
+}
+
 int posix_memalign_enter(struct pt_regs *ctx, void **memptr, size_t alignment,
                          size_t size) {
         u64 memptr64 = (u64)(size_t)memptr;
@@ -449,12 +462,15 @@ if not kernel_trace:
         attach_probes("malloc")
         attach_probes("calloc")
         attach_probes("realloc")
+        attach_probes("mmap")
         attach_probes("posix_memalign")
         attach_probes("valloc", can_fail=True) # failed on Android, is deprecated in libc.so from bionic directory
         attach_probes("memalign")
         attach_probes("pvalloc", can_fail=True) # failed on Android, is deprecated in libc.so from bionic directory
         attach_probes("aligned_alloc", can_fail=True)  # added in C11
         bpf.attach_uprobe(name=obj, sym="free", fn_name="free_enter",
+                                  pid=pid)
+        bpf.attach_uprobe(name=obj, sym="munmap", fn_name="munmap_enter",
                                   pid=pid)
 
 else:
@@ -494,7 +510,7 @@ def print_outstanding():
                         stack = list(stack_traces.walk(info.stack_id))
                         combined = []
                         for addr in stack:
-                                combined.append(bpf.sym(addr, pid,
+                                combined.append(('0x'+format(addr, '016x')+'\t').encode('utf-8') + bpf.sym(addr, pid,
                                         show_module=True, show_offset=True))
                         alloc_info[info.stack_id] = Allocation(combined,
                                                                info.size)
@@ -522,7 +538,7 @@ def print_outstanding_combined():
                                                       show_module=True,
                                                       show_offset=True)
                                 trace.append(sym)
-                        trace = "\n\t\t".join(trace)
+                        trace = "\n\t\t".join(trace.decode())
                 except KeyError:
                         trace = "stack information lost"
 

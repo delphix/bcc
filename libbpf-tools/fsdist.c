@@ -24,6 +24,7 @@
 
 #include "fsdist.h"
 #include "fsdist.skel.h"
+#include "btf_helpers.h"
 #include "trace_helpers.h"
 
 #define warn(...) fprintf(stderr, __VA_ARGS__)
@@ -194,8 +195,7 @@ static void alias_parse(char *prog)
 	}
 }
 
-static int libbpf_print_fn(enum libbpf_print_level level,
-			   const char *format, va_list args)
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
 	if (level == LIBBPF_DEBUG && !verbose)
 		return 0;
@@ -234,7 +234,7 @@ static bool check_fentry()
 	for (i = 0; i < MAX_OP; i++) {
 		fn_name = fs_configs[fs_type].op_funcs[i];
 		module = fs_configs[fs_type].fs;
-		if (fn_name && !fentry_exists(fn_name, module)) {
+		if (fn_name && !fentry_can_attach(fn_name, module)) {
 			support_fentry = false;
 			break;
 		}
@@ -300,59 +300,51 @@ static int attach_kprobes(struct fsdist_bpf *obj)
 
 	/* READ */
 	obj->links.file_read_entry = bpf_program__attach_kprobe(obj->progs.file_read_entry, false, cfg->op_funcs[READ]);
-	err = libbpf_get_error(obj->links.file_read_entry);
-	if (err)
+	if (!obj->links.file_read_entry)
 		goto errout;
 	obj->links.file_read_exit = bpf_program__attach_kprobe(obj->progs.file_read_exit, true, cfg->op_funcs[READ]);
-	err = libbpf_get_error(obj->links.file_read_exit);
-	if (err)
+	if (!obj->links.file_read_exit)
 		goto errout;
 	/* WRITE */
 	obj->links.file_write_entry = bpf_program__attach_kprobe(obj->progs.file_write_entry, false, cfg->op_funcs[WRITE]);
-	err = libbpf_get_error(obj->links.file_write_entry);
-	if (err)
+	if (!obj->links.file_write_entry)
 		goto errout;
 	obj->links.file_write_exit = bpf_program__attach_kprobe(obj->progs.file_write_exit, true, cfg->op_funcs[WRITE]);
-	err = libbpf_get_error(obj->links.file_write_exit);
-	if (err)
+	if (!obj->links.file_write_exit)
 		goto errout;
 	/* OPEN */
 	obj->links.file_open_entry = bpf_program__attach_kprobe(obj->progs.file_open_entry, false, cfg->op_funcs[OPEN]);
-	err = libbpf_get_error(obj->links.file_open_entry);
-	if (err)
+	if (!obj->links.file_open_entry)
 		goto errout;
 	obj->links.file_open_exit = bpf_program__attach_kprobe(obj->progs.file_open_exit, true, cfg->op_funcs[OPEN]);
-	err = libbpf_get_error(obj->links.file_open_exit);
-	if (err)
+	if (!obj->links.file_open_exit)
 		goto errout;
 	/* FSYNC */
 	obj->links.file_sync_entry = bpf_program__attach_kprobe(obj->progs.file_sync_entry, false, cfg->op_funcs[FSYNC]);
-	err = libbpf_get_error(obj->links.file_sync_entry);
-	if (err)
+	if (!obj->links.file_sync_entry)
 		goto errout;
 	obj->links.file_sync_exit = bpf_program__attach_kprobe(obj->progs.file_sync_exit, true, cfg->op_funcs[FSYNC]);
-	err = libbpf_get_error(obj->links.file_sync_exit);
-	if (err)
+	if (!obj->links.file_sync_exit)
 		goto errout;
 	/* GETATTR */
 	if (!cfg->op_funcs[GETATTR])
 		return 0;
 	obj->links.getattr_entry = bpf_program__attach_kprobe(obj->progs.getattr_entry, false, cfg->op_funcs[GETATTR]);
-	err = libbpf_get_error(obj->links.getattr_entry);
-	if (err)
+	if (!obj->links.getattr_entry)
 		goto errout;
 	obj->links.getattr_exit = bpf_program__attach_kprobe(obj->progs.getattr_exit, true, cfg->op_funcs[GETATTR]);
-	err = libbpf_get_error(obj->links.getattr_exit);
-	if (err)
+	if (!obj->links.getattr_exit)
 		goto errout;
 	return 0;
 errout:
+	err = -errno;
 	warn("failed to attach kprobe: %ld\n", err);
 	return err;
 }
 
 int main(int argc, char **argv)
 {
+	LIBBPF_OPTS(bpf_object_open_opts, open_opts);
 	static const struct argp argp = {
 		.options = opts,
 		.parser = parse_arg,
@@ -374,15 +366,16 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
 	libbpf_set_print(libbpf_print_fn);
 
-	err = bump_memlock_rlimit();
+	err = ensure_core_btf(&open_opts);
 	if (err) {
-		warn("failed to increase rlimit: %d\n", err);
+		fprintf(stderr, "failed to fetch necessary BTF for CO-RE: %s\n", strerror(-err));
 		return 1;
 	}
 
-	skel = fsdist_bpf__open();
+	skel = fsdist_bpf__open_opts(&open_opts);
 	if (!skel) {
 		warn("failed to open BPF object\n");
 		return 1;
@@ -451,6 +444,7 @@ int main(int argc, char **argv)
 
 cleanup:
 	fsdist_bpf__destroy(skel);
+	cleanup_core_btf(&open_opts);
 
 	return err != 0;
 }

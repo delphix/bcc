@@ -39,10 +39,10 @@ const char argp_program_doc[] =
 "USAGE: softirqs [--help] [-T] [-N] [-d] [interval] [count]\n"
 "\n"
 "EXAMPLES:\n"
-"    softirqss            # sum soft irq event time\n"
-"    softirqss -d         # show soft irq event time as histograms\n"
-"    softirqss 1 10       # print 1 second summaries, 10 times\n"
-"    softirqss -NT 1      # 1s summaries, nanoseconds, and timestamps\n";
+"    softirqs            # sum soft irq event time\n"
+"    softirqs -d         # show soft irq event time as histograms\n"
+"    softirqs 1 10       # print 1 second summaries, 10 times\n"
+"    softirqs -NT 1      # 1s summaries, nanoseconds, and timestamps\n";
 
 static const struct argp_option opts[] = {
 	{ "distributed", 'd', NULL, 0, "Show distributions as histograms" },
@@ -100,8 +100,7 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	return 0;
 }
 
-int libbpf_print_fn(enum libbpf_print_level level,
-		const char *format, va_list args)
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
@@ -196,18 +195,21 @@ int main(int argc, char **argv)
 	if (err)
 		return err;
 
+	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
 	libbpf_set_print(libbpf_print_fn);
-
-	err = bump_memlock_rlimit();
-	if (err) {
-		fprintf(stderr, "failed to increase rlimit: %d\n", err);
-		return 1;
-	}
 
 	obj = softirqs_bpf__open();
 	if (!obj) {
 		fprintf(stderr, "failed to open BPF object\n");
 		return 1;
+	}
+
+	if (probe_tp_btf("softirq_entry")) {
+		bpf_program__set_autoload(obj->progs.softirq_entry, false);
+		bpf_program__set_autoload(obj->progs.softirq_exit, false);
+	} else {
+		bpf_program__set_autoload(obj->progs.softirq_entry_btf, false);
+		bpf_program__set_autoload(obj->progs.softirq_exit_btf, false);
 	}
 
 	/* initialize global data (filtering options) */

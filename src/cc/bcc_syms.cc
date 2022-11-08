@@ -34,18 +34,24 @@
 
 #include "syms.h"
 
-ino_t ProcStat::getinode_() {
+bool ProcStat::getinode_(ino_t &inode) {
   struct stat s;
-  return (!stat(procfs_.c_str(), &s)) ? s.st_ino : -1;
+  if (!stat(procfs_.c_str(), &s)) {
+    inode = s.st_ino;
+    return true;
+  } else {
+    return false;
+  }
 }
 
 bool ProcStat::is_stale() {
-  ino_t cur_inode = getinode_();
-  return (cur_inode > 0) && (cur_inode != inode_);
+  ino_t cur_inode;
+  return getinode_(cur_inode) && (cur_inode != inode_);
 }
 
-ProcStat::ProcStat(int pid)
-    : procfs_(tfm::format("/proc/%d/exe", pid)), inode_(getinode_()) {}
+ProcStat::ProcStat(int pid) : procfs_(tfm::format("/proc/%d/exe", pid)) {
+  getinode_(inode_);
+}
 
 void KSyms::_add_symbol(const char *symname, const char *modname, uint64_t addr, void *p) {
   KSyms *ks = static_cast<KSyms *>(p);
@@ -238,7 +244,7 @@ ProcSyms::Module::Module(const char *name, const char *path,
   // Other symbol files
   if (bcc_is_valid_perf_map(path_.c_str()) == 1)
     type_ = ModuleType::PERF_MAP;
-  else if (bcc_elf_is_vdso(path_.c_str()) == 1)
+  else if (bcc_elf_is_vdso(name_.c_str()) == 1)
     type_ = ModuleType::VDSO;
 
   // Will be stored later
@@ -289,11 +295,8 @@ bool ProcSyms::Module::contains(uint64_t addr, uint64_t &offset) const {
   for (const auto &range : ranges_) {
     if (addr >= range.start && addr < range.end) {
       if (type_ == ModuleType::SO || type_ == ModuleType::VDSO) {
-        // Offset within the mmap
-        offset = addr - range.start + range.file_offset;
-
-        // Offset within the ELF for SO symbol lookup
-        offset += (elf_so_addr_ - elf_so_offset_);
+        offset = __so_calc_mod_offset(range.start, range.file_offset,
+                                      elf_so_addr_, elf_so_offset_, addr);
       } else {
         offset = addr;
       }
@@ -619,9 +622,26 @@ file_match:
   return -1;
 }
 
+uint64_t __so_calc_global_addr(uint64_t mod_start_addr,
+                               uint64_t mod_file_offset,
+                               uint64_t elf_sec_start_addr,
+                               uint64_t elf_sec_file_offset, uint64_t offset) {
+  return offset + (mod_start_addr - mod_file_offset) -
+         (elf_sec_start_addr - elf_sec_file_offset);
+}
+
+uint64_t __so_calc_mod_offset(uint64_t mod_start_addr, uint64_t mod_file_offset,
+                              uint64_t elf_sec_start_addr,
+                              uint64_t elf_sec_file_offset,
+                              uint64_t global_addr) {
+  return global_addr - (mod_start_addr - mod_file_offset) +
+         (elf_sec_start_addr - elf_sec_file_offset);
+}
+
 int bcc_resolve_global_addr(int pid, const char *module, const uint64_t address,
                             uint8_t inode_match_only, uint64_t *global) {
   struct stat s;
+  uint64_t elf_so_addr, elf_so_offset;
   if (stat(module, &s))
     return -1;
 
@@ -632,7 +652,11 @@ int bcc_resolve_global_addr(int pid, const char *module, const uint64_t address,
       mod.start == 0x0)
     return -1;
 
-  *global = mod.start - mod.file_offset + address;
+  if (bcc_elf_get_text_scn_info(module, &elf_so_addr, &elf_so_offset) < 0)
+    return -1;
+
+  *global = __so_calc_global_addr(mod.start, mod.file_offset, elf_so_addr,
+                                  elf_so_offset, address);
   return 0;
 }
 
