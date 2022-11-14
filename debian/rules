@@ -9,7 +9,7 @@ DEBIAN_REVISION := $(shell dpkg-parsechangelog | sed -rne "s,^Version: ([0-9.]+)
 UPSTREAM_VERSION := $(shell dpkg-parsechangelog | sed -rne "s,^Version: ([0-9.]+)(~|-)(.*),\1,p")
 
 %:
-	dh $@ --buildsystem=cmake --parallel --with python3
+	dh $@ --buildsystem=cmake --with python3
 
 # tests cannot be run in parallel
 override_dh_auto_test:
