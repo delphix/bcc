@@ -3,7 +3,11 @@
 
 include_directories(${PROJECT_SOURCE_DIR}/src/cc)
 include_directories(${PROJECT_SOURCE_DIR}/src/cc/api)
+if (CMAKE_USE_LIBBPF_PACKAGE AND LIBBPF_FOUND)
+include_directories(${PROJECT_SOURCE_DIR}/src/cc/compat)
+else()
 include_directories(${PROJECT_SOURCE_DIR}/src/cc/libbpf/include/uapi)
+endif()
 include_directories(${PROJECT_SOURCE_DIR}/tests/python/include)
 
 add_executable(test_static test_static.c)
@@ -14,6 +18,7 @@ else()
 endif()
 
 add_test(NAME c_test_static COMMAND ${TEST_WRAPPER} c_test_static sudo ${CMAKE_CURRENT_BINARY_DIR}/test_static)
+add_compile_options(-DCMAKE_CURRENT_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result -fPIC")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-unused-result -fPIC")

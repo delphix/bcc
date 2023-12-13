@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # @lint-avoid-python-3-compatibility-imports
 #
 # compactsnoop  Trace compact zone and print details including issuing PID.
@@ -18,6 +18,7 @@ from bcc import BPF
 import argparse
 import platform
 from datetime import datetime, timedelta
+import sys
 
 # arguments
 examples = """examples:
@@ -123,7 +124,7 @@ static inline int zone_idx_(struct zone *zone)
 {
     struct pglist_data *zone_pgdat = NULL;
     bpf_probe_read_kernel(&zone_pgdat, sizeof(zone_pgdat), &zone->zone_pgdat);
-    return zone - zone_pgdat->node_zones;
+    return ((u64)zone - (u64)zone_pgdat->node_zones)/sizeof(struct zone);
 }
 
 #ifdef EXTNEDED_FIELDS
@@ -389,6 +390,8 @@ def print_event(cpu, data, size):
             sym = b.ksym(addr, show_offset=True)
             print("\t%s" % sym)
         print("")
+
+    sys.stdout.flush()
 
 # loop with callback to print_event
 b["events"].open_perf_buffer(print_event, page_cnt=64)

@@ -24,6 +24,7 @@
 
 #include "fsslower.h"
 #include "fsslower.skel.h"
+#include "btf_helpers.h"
 #include "trace_helpers.h"
 
 #define PERF_BUFFER_PAGES	64
@@ -180,8 +181,7 @@ static void alias_parse(char *prog)
 	}
 }
 
-static int libbpf_print_fn(enum libbpf_print_level level,
-			   const char *format, va_list args)
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
 	if (level == LIBBPF_DEBUG && !verbose)
 		return 0;
@@ -202,7 +202,7 @@ static bool check_fentry()
 	for (i = 0; i < MAX_OP; i++) {
 		fn_name = fs_configs[fs_type].op_funcs[i];
 		module = fs_configs[fs_type].fs;
-		if (fn_name && !fentry_exists(fn_name, module)) {
+		if (fn_name && !fentry_can_attach(fn_name, module)) {
 			support_fentry = false;
 			break;
 		}
@@ -257,43 +257,36 @@ static int attach_kprobes(struct fsslower_bpf *obj)
 
 	/* READ */
 	obj->links.file_read_entry = bpf_program__attach_kprobe(obj->progs.file_read_entry, false, cfg->op_funcs[READ]);
-	err = libbpf_get_error(obj->links.file_read_entry);
-	if (err)
+	if (!obj->links.file_read_entry)
 		goto errout;
 	obj->links.file_read_exit = bpf_program__attach_kprobe(obj->progs.file_read_exit, true, cfg->op_funcs[READ]);
-	err = libbpf_get_error(obj->links.file_read_exit);
-	if (err)
+	if (!obj->links.file_read_exit)
 		goto errout;
 	/* WRITE */
 	obj->links.file_write_entry = bpf_program__attach_kprobe(obj->progs.file_write_entry, false, cfg->op_funcs[WRITE]);
-	err = libbpf_get_error(obj->links.file_write_entry);
-	if (err)
+	if (!obj->links.file_write_entry)
 		goto errout;
 	obj->links.file_write_exit = bpf_program__attach_kprobe(obj->progs.file_write_exit, true, cfg->op_funcs[WRITE]);
-	err = libbpf_get_error(obj->links.file_write_exit);
-	if (err)
+	if (!obj->links.file_write_exit)
 		goto errout;
 	/* OPEN */
 	obj->links.file_open_entry = bpf_program__attach_kprobe(obj->progs.file_open_entry, false, cfg->op_funcs[OPEN]);
-	err = libbpf_get_error(obj->links.file_open_entry);
-	if (err)
+	if (!obj->links.file_open_entry)
 		goto errout;
 	obj->links.file_open_exit = bpf_program__attach_kprobe(obj->progs.file_open_exit, true, cfg->op_funcs[OPEN]);
-	err = libbpf_get_error(obj->links.file_open_exit);
-	if (err)
+	if (!obj->links.file_open_exit)
 		goto errout;
 	/* FSYNC */
 	obj->links.file_sync_entry = bpf_program__attach_kprobe(obj->progs.file_sync_entry, false, cfg->op_funcs[FSYNC]);
-	err = libbpf_get_error(obj->links.file_sync_entry);
-	if (err)
+	if (!obj->links.file_sync_entry)
 		goto errout;
 	obj->links.file_sync_exit = bpf_program__attach_kprobe(obj->progs.file_sync_exit, true, cfg->op_funcs[FSYNC]);
-	err = libbpf_get_error(obj->links.file_sync_exit);
-	if (err)
+	if (!obj->links.file_sync_exit)
 		goto errout;
 	return 0;
 
 errout:
+	err = -errno;
 	warn("failed to attach kprobe: %ld\n", err);
 	return err;
 }
@@ -357,12 +350,12 @@ static void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
 
 int main(int argc, char **argv)
 {
+	LIBBPF_OPTS(bpf_object_open_opts, open_opts);
 	static const struct argp argp = {
 		.options = opts,
 		.parser = parse_arg,
 		.doc = argp_program_doc,
 	};
-	struct perf_buffer_opts pb_opts;
 	struct perf_buffer *pb = NULL;
 	struct fsslower_bpf *skel;
 	__u64 time_end = 0;
@@ -378,15 +371,16 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
 	libbpf_set_print(libbpf_print_fn);
 
-	err = bump_memlock_rlimit();
+	err = ensure_core_btf(&open_opts);
 	if (err) {
-		warn("failed to increase rlimit: %d\n", err);
+		fprintf(stderr, "failed to fetch necessary BTF for CO-RE: %s\n", strerror(-err));
 		return 1;
 	}
 
-	skel = fsslower_bpf__open();
+	skel = fsslower_bpf__open_opts(&open_opts);
 	if (!skel) {
 		warn("failed to open BPF object\n");
 		return 1;
@@ -429,13 +423,10 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
-	pb_opts.sample_cb = handle_event;
-	pb_opts.lost_cb = handle_lost_events;
 	pb = perf_buffer__new(bpf_map__fd(skel->maps.events), PERF_BUFFER_PAGES,
-			      &pb_opts);
-	err = libbpf_get_error(pb);
-	if (err) {
-		pb = NULL;
+			      handle_event, handle_lost_events, NULL, NULL);
+	if (!pb) {
+		err = -errno;
 		warn("failed to open perf buffer: %d\n", err);
 		goto cleanup;
 	}
@@ -454,8 +445,8 @@ int main(int argc, char **argv)
 	/* main: poll */
 	while (!exiting) {
 		err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS);
-		if (err < 0 && errno != EINTR) {
-			fprintf(stderr, "error polling perf buffer: %s\n", strerror(errno));
+		if (err < 0 && err != -EINTR) {
+			fprintf(stderr, "error polling perf buffer: %s\n", strerror(-err));
 			goto cleanup;
 		}
 		if (duration && get_ktime_ns() > time_end)
@@ -467,6 +458,7 @@ int main(int argc, char **argv)
 cleanup:
 	perf_buffer__free(pb);
 	fsslower_bpf__destroy(skel);
+	cleanup_core_btf(&open_opts);
 
 	return err != 0;
 }
