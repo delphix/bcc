@@ -118,7 +118,7 @@ static void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
 	warn("lost %llu events on CPU #%d\n", lost_cnt, cpu);
 }
 
-static int get_libc_path(char *path)
+static int get_libc_path(char *path, size_t path_sz)
 {
 	char proc_path[PATH_MAX + 32] = {};
 	char buf[PATH_MAX] = {};
@@ -146,13 +146,17 @@ static int get_libc_path(char *path)
 		filename = strrchr(buf, '/') + 1;
 		if (sscanf(filename, "libc-%f.so", &version) == 1 ||
 		    sscanf(filename, "libc.so.%f", &version) == 1) {
+			int rc;
+
 			if (target_pid == 0) {
-				memcpy(path, buf, strlen(buf));
+				rc = snprintf(path, path_sz, "%s", buf);
 			} else {
-				snprintf(proc_path, sizeof(proc_path), "/proc/%d/root%s", target_pid, buf);
-				memcpy(path, proc_path, strlen(proc_path));
+				rc = snprintf(path, path_sz, "/proc/%d/root%s", target_pid, buf);
 			}
 			fclose(f);
+
+			if (rc < 0 || (size_t)rc >= path_sz)
+				return -ENAMETOOLONG;
 			return 0;
 		}
 	}
@@ -167,7 +171,7 @@ static int attach_uprobes(struct gethostlatency_bpf *obj, struct bpf_link *links
 	char libc_path[PATH_MAX] = {};
 	off_t func_off;
 
-	err = get_libc_path(libc_path);
+	err = get_libc_path(libc_path, PATH_MAX);
 	if (err) {
 		warn("could not find libc.so\n");
 		return -1;

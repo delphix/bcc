@@ -1,0 +1,4 @@
+usr/share/bcc/introspection/*
+usr/share/bcc/tools/* usr/sbin/
+usr/share/bcc/man/* /usr/share/man
+usr/share/bcc/doc/*
