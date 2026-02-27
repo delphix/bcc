@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # @lint-avoid-python-3-compatibility-imports
 #
 # btrfsdist  Summarize btrfs operation latency.
@@ -53,7 +53,7 @@ else:
     label = "usecs"
 if args.interval and int(args.interval) == 0:
     print("ERROR: interval 0. Exiting.")
-    exit()
+    exit(1)
 debug = 0
 
 # define BPF program
@@ -188,7 +188,7 @@ with open(kallsyms) as syms:
     if ops == '':
         print("ERROR: no btrfs_file_operations in /proc/kallsyms. Exiting.")
         print("HINT: the kernel should be built with CONFIG_KALLSYMS_ALL.")
-        exit()
+        exit(1)
     bpf_text = bpf_text.replace('BTRFS_FILE_OPERATIONS', ops)
 bpf_text = bpf_text.replace('FACTOR', str(factor))
 if args.pid:
@@ -231,7 +231,7 @@ while (1):
     if args.interval and (not args.notimestamp):
         print(strftime("%H:%M:%S:"))
 
-    dist.print_log2_hist(label, "operation")
+    dist.print_log2_hist(label, "operation", section_print_fn=bytes.decode)
     dist.clear()
 
     countdown -= 1

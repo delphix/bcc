@@ -20,15 +20,14 @@ lib = ct.CDLL("libbcc.so.0", use_errno=True)
 from .perf import Perf
 
 # keep in sync with bcc_common.h
-lib.bpf_module_create_b.restype = ct.c_void_p
-lib.bpf_module_create_b.argtypes = [ct.c_char_p, ct.c_char_p, ct.c_uint,
-        ct.c_char_p]
 lib.bpf_module_create_c.restype = ct.c_void_p
 lib.bpf_module_create_c.argtypes = [ct.c_char_p, ct.c_uint,
         ct.POINTER(ct.c_char_p), ct.c_int, ct.c_bool, ct.c_char_p]
 lib.bpf_module_create_c_from_string.restype = ct.c_void_p
 lib.bpf_module_create_c_from_string.argtypes = [ct.c_char_p, ct.c_uint,
         ct.POINTER(ct.c_char_p), ct.c_int, ct.c_bool, ct.c_char_p]
+lib.bpf_module_rw_engine_enabled.restype = ct.c_bool
+lib.bpf_module_rw_engine_enabled.argtypes = None
 lib.bpf_module_destroy.restype = None
 lib.bpf_module_destroy.argtypes = [ct.c_void_p]
 lib.bpf_module_license.restype = ct.c_char_p
@@ -103,7 +102,7 @@ lib.bpf_attach_socket.restype = ct.c_int
 lib.bpf_attach_socket.argtypes = [ct.c_int, ct.c_int]
 lib.bcc_func_load.restype = ct.c_int
 lib.bcc_func_load.argtypes = [ct.c_void_p, ct.c_int, ct.c_char_p, ct.c_void_p,
-        ct.c_size_t, ct.c_char_p, ct.c_uint, ct.c_int, ct.c_char_p, ct.c_uint, ct.c_char_p]
+        ct.c_size_t, ct.c_char_p, ct.c_uint, ct.c_int, ct.c_char_p, ct.c_uint, ct.c_char_p, ct.c_uint]
 _RAW_CB_TYPE = ct.CFUNCTYPE(None, ct.py_object, ct.c_void_p, ct.c_int)
 _LOST_CB_TYPE = ct.CFUNCTYPE(None, ct.py_object, ct.c_ulonglong)
 lib.bpf_attach_kprobe.restype = ct.c_int
@@ -134,12 +133,26 @@ lib.bpf_has_kernel_btf.restype = ct.c_bool
 lib.bpf_has_kernel_btf.argtypes = None
 lib.kernel_struct_has_field.restype = ct.c_int
 lib.kernel_struct_has_field.argtypes = [ct.c_char_p, ct.c_char_p]
+lib.kernel_enum_has_val.restype = ct.c_int
+lib.kernel_enum_has_val.argtypes = [ct.c_char_p, ct.c_char_p]
 lib.bpf_open_perf_buffer.restype = ct.c_void_p
 lib.bpf_open_perf_buffer.argtypes = [_RAW_CB_TYPE, _LOST_CB_TYPE, ct.py_object, ct.c_int, ct.c_int, ct.c_int]
+
+class bcc_perf_buffer_opts(ct.Structure):
+    _fields_ = [
+        ('pid', ct.c_int),
+        ('cpu', ct.c_int),
+        ('wakeup_events', ct.c_int),
+    ]
+
+lib.bpf_open_perf_buffer_opts.restype = ct.c_void_p
+lib.bpf_open_perf_buffer_opts.argtypes = [_RAW_CB_TYPE, _LOST_CB_TYPE, ct.py_object, ct.c_int, ct.POINTER(bcc_perf_buffer_opts)]
 lib.bpf_open_perf_event.restype = ct.c_int
 lib.bpf_open_perf_event.argtypes = [ct.c_uint, ct.c_ulonglong, ct.c_int, ct.c_int]
 lib.perf_reader_poll.restype = ct.c_int
 lib.perf_reader_poll.argtypes = [ct.c_int, ct.POINTER(ct.c_void_p), ct.c_int]
+lib.perf_reader_consume.restype = ct.c_int
+lib.perf_reader_consume.argtypes = [ct.c_int, ct.POINTER(ct.c_void_p)]
 lib.perf_reader_free.restype = None
 lib.perf_reader_free.argtypes = [ct.c_void_p]
 lib.perf_reader_fd.restype = int
@@ -169,6 +182,26 @@ lib.bpf_poll_ringbuf.restype = ct.c_int
 lib.bpf_poll_ringbuf.argtypes = [ct.c_void_p, ct.c_int]
 lib.bpf_consume_ringbuf.restype = ct.c_int
 lib.bpf_consume_ringbuf.argtypes = [ct.c_void_p]
+class bpf_test_run_opts(ct.Structure):
+    _fields_ = [
+        ('sz', ct.c_size_t),
+        ('data_in', ct.c_void_p),
+        ('data_out', ct.c_void_p),
+        ('data_size_in', ct.c_uint32),
+        ('data_size_out', ct.c_uint32),
+        ('ctx_in', ct.c_void_p),
+        ('ctx_out', ct.c_void_p),
+        ('ctx_size_in', ct.c_uint32),
+        ('ctx_size_out', ct.c_uint32),
+        ('retval', ct.c_uint32),
+        ('repeat', ct.c_int),
+        ('duration', ct.c_uint32),
+        ('flags', ct.c_uint32),
+        ('cpu', ct.c_uint32),
+        ('batch_size', ct.c_uint32),
+    ]
+lib.bpf_prog_test_run_opts.restype = ct.c_int
+lib.bpf_prog_test_run_opts.argtypes = [ct.c_int, ct.POINTER(bpf_test_run_opts)]
 
 # bcc symbol helpers
 class bcc_symbol(ct.Structure):
@@ -200,6 +233,8 @@ class bcc_symbol_option(ct.Structure):
             ('use_symbol_type', ct.c_uint),
         ]
 
+lib.bcc_procutils_which_so_in_process.restype = ct.POINTER(ct.c_char)
+lib.bcc_procutils_which_so_in_process.argtypes = [ct.c_char_p, ct.c_int]
 lib.bcc_procutils_which_so.restype = ct.POINTER(ct.c_char)
 lib.bcc_procutils_which_so.argtypes = [ct.c_char_p, ct.c_int]
 lib.bcc_procutils_free.restype = None

@@ -12,6 +12,7 @@
 #include <bpf/bpf.h>
 #include "tcpconnect.h"
 #include "tcpconnect.skel.h"
+#include "btf_helpers.h"
 #include "trace_helpers.h"
 #include "map_helpers.h"
 
@@ -103,17 +104,18 @@ static int get_uint(const char *arg, unsigned int *ret,
 }
 
 static const struct argp_option opts[] = {
-	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
-	{ "timestamp", 't', NULL, 0, "Include timestamp on output" },
-	{ "count", 'c', NULL, 0, "Count connects per src ip and dst ip/port" },
-	{ "print-uid", 'U', NULL, 0, "Include UID on output" },
-	{ "pid", 'p', "PID", 0, "Process PID to trace" },
-	{ "uid", 'u', "UID", 0, "Process UID to trace" },
+	{ "verbose", 'v', NULL, 0, "Verbose debug output", 0 },
+	{ "timestamp", 't', NULL, 0, "Include timestamp on output", 0 },
+	{ "count", 'c', NULL, 0, "Count connects per src ip and dst ip/port", 0 },
+	{ "print-uid", 'U', NULL, 0, "Include UID on output", 0 },
+	{ "pid", 'p', "PID", 0, "Process PID to trace", 0 },
+	{ "uid", 'u', "UID", 0, "Process UID to trace", 0 },
+	{ "source-port", 's', NULL, 0, "Consider source port when counting", 0 },
 	{ "port", 'P', "PORTS", 0,
-	  "Comma-separated list of destination ports to trace" },
-	{ "cgroupmap", 'C', "PATH", 0, "trace cgroups in this map" },
-	{ "mntnsmap", 'M', "PATH", 0, "trace mount namespaces in this map" },
-	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
+	  "Comma-separated list of destination ports to trace", 0 },
+	{ "cgroupmap", 'C', "PATH", 0, "trace cgroups in this map", 0 },
+	{ "mntnsmap", 'M', "PATH", 0, "trace mount namespaces in this map", 0 },
+	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help", 0 },
 	{},
 };
 
@@ -126,6 +128,7 @@ static struct env {
 	uid_t uid;
 	int nports;
 	int ports[MAX_PORTS];
+	bool source_port;
 } env = {
 	.uid = (uid_t) -1,
 };
@@ -144,6 +147,9 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 		break;
 	case 'c':
 		env.count = true;
+		break;
+	case 's':
+		env.source_port = true;
 		break;
 	case 't':
 		env.print_timestamp = true;
@@ -186,8 +192,7 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	return 0;
 }
 
-static int libbpf_print_fn(enum libbpf_print_level level,
-		const char *format, va_list args)
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
@@ -212,7 +217,7 @@ static void print_count_ipv4(int map_fd)
 	struct in_addr src;
 	struct in_addr dst;
 
-	if (dump_hash(map_fd, keys, key_size, counts, value_size, &n, &zero)) {
+	if (dump_hash(map_fd, keys, key_size, counts, value_size, &n, &zero, false)) {
 		warn("dump_hash: %s", strerror(errno));
 		return;
 	}
@@ -221,10 +226,14 @@ static void print_count_ipv4(int map_fd)
 		src.s_addr = keys[i].saddr;
 		dst.s_addr = keys[i].daddr;
 
-		printf("%-25s %-25s %-20d %-10llu\n",
+		printf("%-25s %-25s",
 		       inet_ntop(AF_INET, &src, s, sizeof(s)),
-		       inet_ntop(AF_INET, &dst, d, sizeof(d)),
-		       ntohs(keys[i].dport), counts[i]);
+		       inet_ntop(AF_INET, &dst, d, sizeof(d)));
+		if (env.source_port)
+			printf(" %-20d", keys[i].sport);
+		printf(" %-20d", ntohs(keys[i].dport));
+		printf(" %-10llu", counts[i]);
+		printf("\n");
 	}
 }
 
@@ -241,7 +250,7 @@ static void print_count_ipv6(int map_fd)
 	struct in6_addr src;
 	struct in6_addr dst;
 
-	if (dump_hash(map_fd, keys, key_size, counts, value_size, &n, &zero)) {
+	if (dump_hash(map_fd, keys, key_size, counts, value_size, &n, &zero, false)) {
 		warn("dump_hash: %s", strerror(errno));
 		return;
 	}
@@ -250,21 +259,33 @@ static void print_count_ipv6(int map_fd)
 		memcpy(src.s6_addr, keys[i].saddr, sizeof(src.s6_addr));
 		memcpy(dst.s6_addr, keys[i].daddr, sizeof(src.s6_addr));
 
-		printf("%-25s %-25s %-20d %-10llu\n",
+		printf("%-25s %-25s",
 		       inet_ntop(AF_INET6, &src, s, sizeof(s)),
-		       inet_ntop(AF_INET6, &dst, d, sizeof(d)),
-		       ntohs(keys[i].dport), counts[i]);
+		       inet_ntop(AF_INET6, &dst, d, sizeof(d)));
+		if (env.source_port)
+			printf(" %-20d", keys[i].sport);
+		printf(" %-20d", ntohs(keys[i].dport));
+		printf(" %-10llu", counts[i]);
+		printf("\n");
 	}
+}
+
+static void print_count_header()
+{
+	printf("\n%-25s %-25s", "LADDR", "RADDR");
+	if (env.source_port)
+		printf(" %-20s", "LPORT");
+	printf(" %-20s", "RPORT");
+	printf(" %-10s", "CONNECTS");
+	printf("\n");
 }
 
 static void print_count(int map_fd_ipv4, int map_fd_ipv6)
 {
-	static const char *header_fmt = "\n%-25s %-25s %-20s %-10s\n";
-
 	while (!exiting)
 		pause();
 
-	printf(header_fmt, "LADDR", "RADDR", "RPORT", "CONNECTS");
+	print_count_header();
 	print_count_ipv4(map_fd_ipv4);
 	print_count_ipv6(map_fd_ipv6);
 }
@@ -275,13 +296,16 @@ static void print_events_header()
 		printf("%-9s", "TIME(s)");
 	if (env.print_uid)
 		printf("%-6s", "UID");
-	printf("%-6s %-12s %-2s %-16s %-16s %-4s\n",
-	       "PID", "COMM", "IP", "SADDR", "DADDR", "DPORT");
+	printf("%-6s %-16s %-2s %-16s %-16s",
+	       "PID", "COMM", "IP", "SADDR", "DADDR");
+	if (env.source_port)
+		printf(" %-5s", "SPORT");
+	printf(" %-5s\n", "DPORT");
 }
 
 static void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
 {
-	const struct event *event = data;
+	struct event event;
 	char src[INET6_ADDRSTRLEN];
 	char dst[INET6_ADDRSTRLEN];
 	union {
@@ -290,32 +314,45 @@ static void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
 	} s, d;
 	static __u64 start_ts;
 
-	if (event->af == AF_INET) {
-		s.x4.s_addr = event->saddr_v4;
-		d.x4.s_addr = event->daddr_v4;
-	} else if (event->af == AF_INET6) {
-		memcpy(&s.x6.s6_addr, event->saddr_v6, sizeof(s.x6.s6_addr));
-		memcpy(&d.x6.s6_addr, event->daddr_v6, sizeof(d.x6.s6_addr));
+	if (data_sz < sizeof(event)) {
+		printf("Error: packet too small\n");
+		return;
+	}
+	/* Copy data as alignment in the perf buffer isn't guaranteed. */
+	memcpy(&event, data, sizeof(event));
+
+	if (event.af == AF_INET) {
+		s.x4.s_addr = event.saddr_v4;
+		d.x4.s_addr = event.daddr_v4;
+	} else if (event.af == AF_INET6) {
+		memcpy(&s.x6.s6_addr, event.saddr_v6, sizeof(s.x6.s6_addr));
+		memcpy(&d.x6.s6_addr, event.daddr_v6, sizeof(d.x6.s6_addr));
 	} else {
-		warn("broken event: event->af=%d", event->af);
+		warn("broken event: event.af=%d", event.af);
 		return;
 	}
 
 	if (env.print_timestamp) {
 		if (start_ts == 0)
-			start_ts = event->ts_us;
-		printf("%-9.3f", (event->ts_us - start_ts) / 1000000.0);
+			start_ts = event.ts_us;
+		printf("%-9.3f", (event.ts_us - start_ts) / 1000000.0);
 	}
 
 	if (env.print_uid)
-		printf("%-6d", event->uid);
+		printf("%-6d", event.uid);
 
-	printf("%-6d %-12.12s %-2d %-16s %-16s %-4d\n",
-	       event->pid, event->task,
-	       event->af == AF_INET ? 4 : 6,
-	       inet_ntop(event->af, &s, src, sizeof(src)),
-	       inet_ntop(event->af, &d, dst, sizeof(dst)),
-	       ntohs(event->dport));
+	printf("%-6d %-16.16s %-2d %-16s %-16s",
+	       event.pid, event.task,
+	       event.af == AF_INET ? 4 : 6,
+	       inet_ntop(event.af, &s, src, sizeof(src)),
+	       inet_ntop(event.af, &d, dst, sizeof(dst)));
+
+	if (env.source_port)
+		printf(" %-5d", event.sport);
+
+	printf(" %-5d", ntohs(event.dport));
+
+	printf("\n");
 }
 
 static void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
@@ -325,17 +362,13 @@ static void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
 
 static void print_events(int perf_map_fd)
 {
-	struct perf_buffer_opts pb_opts = {
-		.sample_cb = handle_event,
-		.lost_cb = handle_lost_events,
-	};
-	struct perf_buffer *pb = NULL;
+	struct perf_buffer *pb;
 	int err;
 
-	pb = perf_buffer__new(perf_map_fd, 128, &pb_opts);
-	err = libbpf_get_error(pb);
-	if (err) {
-		pb = NULL;
+	pb = perf_buffer__new(perf_map_fd, 128,
+			      handle_event, handle_lost_events, NULL, NULL);
+	if (!pb) {
+		err = -errno;
 		warn("failed to open perf buffer: %d\n", err);
 		goto cleanup;
 	}
@@ -343,8 +376,8 @@ static void print_events(int perf_map_fd)
 	print_events_header();
 	while (!exiting) {
 		err = perf_buffer__poll(pb, 100);
-		if (err < 0 && errno != EINTR) {
-			warn("error polling perf buffer: %s\n", strerror(errno));
+		if (err < 0 && err != -EINTR) {
+			warn("error polling perf buffer: %s\n", strerror(-err));
 			goto cleanup;
 		}
 		/* reset err to return 0 if exiting */
@@ -357,6 +390,7 @@ cleanup:
 
 int main(int argc, char **argv)
 {
+	LIBBPF_OPTS(bpf_object_open_opts, open_opts);
 	static const struct argp argp = {
 		.options = opts,
 		.parser = parse_arg,
@@ -372,13 +406,13 @@ int main(int argc, char **argv)
 
 	libbpf_set_print(libbpf_print_fn);
 
-	err = bump_memlock_rlimit();
+	err = ensure_core_btf(&open_opts);
 	if (err) {
-		warn("failed to increase rlimit: %s\n", strerror(errno));
+		fprintf(stderr, "failed to fetch necessary BTF for CO-RE: %s\n", strerror(-err));
 		return 1;
 	}
 
-	obj = tcpconnect_bpf__open();
+	obj = tcpconnect_bpf__open_opts(&open_opts);
 	if (!obj) {
 		warn("failed to open BPF object\n");
 		return 1;
@@ -396,6 +430,8 @@ int main(int argc, char **argv)
 			obj->rodata->filter_ports[i] = htons(env.ports[i]);
 		}
 	}
+	if (env.source_port)
+		obj->rodata->source_port = true;
 
 	err = tcpconnect_bpf__load(obj);
 	if (err) {
@@ -424,6 +460,7 @@ int main(int argc, char **argv)
 
 cleanup:
 	tcpconnect_bpf__destroy(obj);
+	cleanup_core_btf(&open_opts);
 
 	return err != 0;
 }

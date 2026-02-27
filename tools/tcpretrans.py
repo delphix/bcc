@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # @lint-avoid-python-3-compatibility-imports
 #
 # tcpretrans    Trace or count TCP retransmits and TLPs.
@@ -16,7 +16,7 @@
 # 03-Nov-2017   Matthias Tafelmeier Extended this.
 
 from __future__ import print_function
-from bcc import BPF
+from bcc import BPF, tcp
 import argparse
 from time import strftime
 from socket import inet_ntop, AF_INET, AF_INET6
@@ -337,47 +337,32 @@ type = {}
 type[1] = 'R'
 type[2] = 'L'
 
-# from include/net/tcp_states.h:
-tcpstate = {}
-tcpstate[1] = 'ESTABLISHED'
-tcpstate[2] = 'SYN_SENT'
-tcpstate[3] = 'SYN_RECV'
-tcpstate[4] = 'FIN_WAIT1'
-tcpstate[5] = 'FIN_WAIT2'
-tcpstate[6] = 'TIME_WAIT'
-tcpstate[7] = 'CLOSE'
-tcpstate[8] = 'CLOSE_WAIT'
-tcpstate[9] = 'LAST_ACK'
-tcpstate[10] = 'LISTEN'
-tcpstate[11] = 'CLOSING'
-tcpstate[12] = 'NEW_SYN_RECV'
-
 # process event
 def print_ipv4_event(cpu, data, size):
     event = b["ipv4_events"].event(data)
-    print("%-8s %-6d %-2d %-20s %1s> %-20s" % (
+    print("%-8s %-7d %-2d %-20s %1s> %-20s" % (
         strftime("%H:%M:%S"), event.pid, event.ip,
         "%s:%d" % (inet_ntop(AF_INET, pack('I', event.saddr)), event.lport),
         type[event.type],
         "%s:%s" % (inet_ntop(AF_INET, pack('I', event.daddr)), event.dport)),
         end='')
     if args.sequence:
-        print(" %-12s %s" % (tcpstate[event.state], event.seq))
+        print(" %-12s %s" % (tcp.state2str(event.state), event.seq))
     else:
-        print(" %s" % (tcpstate[event.state]))
+        print(" %s" % (tcp.state2str(event.state)))
 
 def print_ipv6_event(cpu, data, size):
     event = b["ipv6_events"].event(data)
-    print("%-8s %-6d %-2d %-20s %1s> %-20s" % (
+    print("%-8s %-7d %-2d %-20s %1s> %-20s" % (
         strftime("%H:%M:%S"), event.pid, event.ip,
         "%s:%d" % (inet_ntop(AF_INET6, event.saddr), event.lport),
         type[event.type],
         "%s:%d" % (inet_ntop(AF_INET6, event.daddr), event.dport)),
         end='')
     if args.sequence:
-        print(" %-12s %s" % (tcpstate[event.state], event.seq))
+        print(" %-12s %s" % (tcp.state2str(event.state), event.seq))
     else:
-        print(" %s" % (tcpstate[event.state]))
+        print(" %s" % (tcp.state2str(event.state)))
 
 def depict_cnt(counts_tab, l3prot='ipv4'):
     for k, v in sorted(counts_tab.items(), key=lambda counts: counts[1].value):
@@ -415,7 +400,7 @@ if args.count:
 # read events
 else:
     # header
-    print("%-8s %-6s %-2s %-20s %1s> %-20s" % ("TIME", "PID", "IP",
+    print("%-8s %-7s %-2s %-20s %1s> %-20s" % ("TIME", "PID", "IP",
         "LADDR:LPORT", "T", "RADDR:RPORT"), end='')
     if args.sequence:
         print(" %-12s %-10s" % ("STATE", "SEQ"))

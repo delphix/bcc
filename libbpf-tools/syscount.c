@@ -6,12 +6,14 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <time.h>
+#include <unistd.h>
 #include <argp.h>
 #include <bpf/bpf.h>
 #include "syscount.h"
 #include "syscount.skel.h"
 #include "errno_helpers.h"
 #include "syscall_helpers.h"
+#include "btf_helpers.h"
 #include "trace_helpers.h"
 
 /* This structure extends data_t by adding a key item which should be sorted
@@ -38,25 +40,27 @@ static const char argp_program_doc[] =
 "    syscount -L              # measure and sort output by latency\n"
 "    syscount -P              # group statistics by pid, not by syscall\n"
 "    syscount -x -i 5         # count only failed syscalls\n"
-"    syscount -e ENOENT -i 5  # count only syscalls failed with a given errno"
+"    syscount -e ENOENT -i 5  # count only syscalls failed with a given errno\n"
+"    syscount -c CG           # Trace process under cgroupsPath CG\n";
 ;
 
 static const struct argp_option opts[] = {
-	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
-	{ "pid", 'p', "PID", 0, "Process PID to trace" },
+	{ "verbose", 'v', NULL, 0, "Verbose debug output", 0 },
+	{ "pid", 'p', "PID", 0, "Process PID to trace", 0 },
 	{ "interval", 'i', "INTERVAL", 0, "Print summary at this interval"
-				" (seconds), 0 for infinite wait (default)" },
-	{ "duration", 'd', "DURATION", 0, "Total tracing duration (seconds)" },
-	{ "top", 'T', "TOP", 0, "Print only the top syscalls (default 10)" },
-	{ "failures", 'x', NULL, 0, "Trace only failed syscalls" },
-	{ "latency", 'L', NULL, 0, "Collect syscall latency" },
+				" (seconds), 0 for infinite wait (default)", 0 },
+	{ "duration", 'd', "DURATION", 0, "Total tracing duration (seconds)", 0 },
+	{ "top", 'T', "TOP", 0, "Print only the top syscalls (default 10)", 0 },
+	{ "cgroup", 'c', "/sys/fs/cgroup/unified/<CG>", 0, "Trace process in cgroup path", 0 },
+	{ "failures", 'x', NULL, 0, "Trace only failed syscalls", 0 },
+	{ "latency", 'L', NULL, 0, "Collect syscall latency", 0 },
 	{ "milliseconds", 'm', NULL, 0, "Display latency in milliseconds"
-					" (default: microseconds)" },
-	{ "process", 'P', NULL, 0, "Count by process and not by syscall" },
+					" (default: microseconds)", 0 },
+	{ "process", 'P', NULL, 0, "Count by process and not by syscall", 0 },
 	{ "errno", 'e', "ERRNO", 0, "Trace only syscalls that return this error"
-				 "(numeric or EPERM, etc.)" },
-	{ "list", 'l', NULL, 0, "Print list of recognized syscalls and exit" },
-	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
+				 "(numeric or EPERM, etc.)", 0 },
+	{ "list", 'l', NULL, 0, "Print list of recognized syscalls and exit", 0 },
+	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help", 0 },
 	{},
 };
 
@@ -72,6 +76,8 @@ static struct env {
 	int duration;
 	int top;
 	pid_t pid;
+	char *cgroupspath;
+	bool cg;
 } env = {
 	.top = 10,
 };
@@ -94,8 +100,7 @@ static int get_int(const char *arg, int *ret, int min, int max)
 	return 0;
 }
 
-static int libbpf_print_fn(enum libbpf_print_level level,
-			   const char *format, va_list args)
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
@@ -122,7 +127,8 @@ static const char *agg_col(struct data_ext_t *val, char *buf, size_t size)
 	if (env.process) {
 		snprintf(buf, size, "%-6u %-15s", val->key, val->comm);
 	} else {
-		syscall_name(val->key, buf, size);
+		if (syscall_name(val->key, buf, size) < 0)
+			snprintf(buf, size, "[unknown: %u]", val->key);
 	}
 	return buf;
 }
@@ -186,7 +192,7 @@ static void print_timestamp()
 
 static bool batch_map_ops = true; /* hope for the best */
 
-static bool read_vals_batch(int fd, struct data_ext_t *vals, __u32 *count)
+static int read_vals_batch(int fd, struct data_ext_t *vals, __u32 *count)
 {
 	struct data_t orig_vals[*count];
 	void *in = NULL, *out;
@@ -198,13 +204,13 @@ static bool read_vals_batch(int fd, struct data_ext_t *vals, __u32 *count)
 		n = *count - n_read;
 		err = bpf_map_lookup_and_delete_batch(fd, &in, &out,
 				keys + n_read, orig_vals + n_read, &n, NULL);
-		if (err && errno != ENOENT) {
+		if (err < 0 && err != -ENOENT) {
 			/* we want to propagate EINVAL upper, so that
 			 * the batch_map_ops flag is set to false */
-			if (errno != EINVAL)
+			if (err != -EINVAL)
 				warn("bpf_map_lookup_and_delete_batch: %s\n",
 				     strerror(-err));
-			return false;
+			return err;
 		}
 		n_read += n;
 		in = out;
@@ -218,7 +224,7 @@ static bool read_vals_batch(int fd, struct data_ext_t *vals, __u32 *count)
 	}
 
 	*count = n_read;
-	return true;
+	return 0;
 }
 
 static bool read_vals(int fd, struct data_ext_t *vals, __u32 *count)
@@ -231,12 +237,12 @@ static bool read_vals(int fd, struct data_ext_t *vals, __u32 *count)
 	int err;
 
 	if (batch_map_ops) {
-		bool ok = read_vals_batch(fd, vals, count);
-		if (!ok && errno == EINVAL) {
+		err = read_vals_batch(fd, vals, count);
+		if (err < 0 && err == -EINVAL) {
 			/* fall back to a racy variant */
 			batch_map_ops = false;
 		} else {
-			return ok;
+			return err >= 0;
 		}
 	}
 
@@ -335,6 +341,10 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 			argp_usage(state);
 		}
 		break;
+	case 'c':
+		env.cgroupspath = arg;
+		env.cg = true;
+		break;
 	case 'e':
 		err = get_int(arg, &number, 1, INT_MAX);
 		if (err) {
@@ -367,6 +377,7 @@ void sig_int(int signo)
 
 int main(int argc, char **argv)
 {
+	LIBBPF_OPTS(bpf_object_open_opts, open_opts);
 	void (*print)(struct data_ext_t *, size_t);
 	int (*compar)(const void *, const void *);
 	static const struct argp argp = {
@@ -379,6 +390,8 @@ int main(int argc, char **argv)
 	int seconds = 0;
 	__u32 count;
 	int err;
+	int idx, cg_map_fd;
+	int cgfd = -1;
 
 	init_syscall_names();
 
@@ -393,13 +406,13 @@ int main(int argc, char **argv)
 
 	libbpf_set_print(libbpf_print_fn);
 
-	err = bump_memlock_rlimit();
+	err = ensure_core_btf(&open_opts);
 	if (err) {
-		warn("failed to increase rlimit: %s\n", strerror(errno));
-		goto free_names;
+		fprintf(stderr, "failed to fetch necessary BTF for CO-RE: %s\n", strerror(-err));
+		return 1;
 	}
 
-	obj = syscount_bpf__open();
+	obj = syscount_bpf__open_opts(&open_opts);
 	if (!obj) {
 		warn("failed to open BPF object\n");
 		err = 1;
@@ -416,6 +429,8 @@ int main(int argc, char **argv)
 		obj->rodata->count_by_process = true;
 	if (env.filter_errno)
 		obj->rodata->filter_errno = env.filter_errno;
+	if (env.cg)
+		obj->rodata->filter_cg = env.cg;
 
 	err = syscount_bpf__load(obj);
 	if (err) {
@@ -423,17 +438,31 @@ int main(int argc, char **argv)
 		goto cleanup_obj;
 	}
 
+	/* update cgroup path fd to map */
+	if (env.cg) {
+		idx = 0;
+		cg_map_fd = bpf_map__fd(obj->maps.cgroup_map);
+		cgfd = open(env.cgroupspath, O_RDONLY);
+		if (cgfd < 0) {
+			fprintf(stderr, "Failed opening Cgroup path: %s", env.cgroupspath);
+			goto cleanup_obj;
+		}
+		if (bpf_map_update_elem(cg_map_fd, &idx, &cgfd, BPF_ANY)) {
+			fprintf(stderr, "Failed adding target cgroup to map");
+			goto cleanup_obj;
+		}
+	}
+
 	obj->links.sys_exit = bpf_program__attach(obj->progs.sys_exit);
-	err = libbpf_get_error(obj->links.sys_exit);
-	if (err) {
-		warn("failed to attach sys_exit program: %s\n",
-		     strerror(-err));
+	if (!obj->links.sys_exit) {
+		err = -errno;
+		warn("failed to attach sys_exit program: %s\n", strerror(-err));
 		goto cleanup_obj;
 	}
 	if (env.latency) {
 		obj->links.sys_enter = bpf_program__attach(obj->progs.sys_enter);
-		err = libbpf_get_error(obj->links.sys_enter);
-		if (err) {
+		if (!obj->links.sys_enter) {
+			err = -errno;
 			warn("failed to attach sys_enter programs: %s\n",
 			     strerror(-err));
 			goto cleanup_obj;
@@ -474,6 +503,9 @@ cleanup_obj:
 	syscount_bpf__destroy(obj);
 free_names:
 	free_syscall_names();
+	cleanup_core_btf(&open_opts);
+	if (cgfd > 0)
+		close(cgfd);
 
 	return err != 0;
 }

@@ -20,6 +20,7 @@
 #include <bpf/bpf.h>
 #include "filetop.h"
 #include "filetop.skel.h"
+#include "btf_helpers.h"
 #include "trace_helpers.h"
 
 #define warn(...) fprintf(stderr, __VA_ARGS__)
@@ -42,6 +43,7 @@ static int output_rows = 20;
 static int sort_by = ALL;
 static int interval = 1;
 static int count = 99999999;
+static bool verbose = false;
 
 const char *argp_program_version = "filetop 0.1";
 const char *argp_program_bug_address =
@@ -57,12 +59,13 @@ const char argp_program_doc[] =
 "    filetop 5 10       # 5s summaries, 10 times\n";
 
 static const struct argp_option opts[] = {
-	{ "pid", 'p', "PID", 0, "Process ID to trace" },
-	{ "noclear", 'C', NULL, 0, "Don't clear the screen" },
-	{ "all", 'a', NULL, 0, "Include special files" },
-	{ "sort", 's', "SORT", 0, "Sort columns, default all [all, reads, writes, rbytes, wbytes]" },
-	{ "rows", 'r', "ROWS", 0, "Maximum rows to print, default 20" },
-	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
+	{ "pid", 'p', "PID", 0, "Process ID to trace", 0 },
+	{ "noclear", 'C', NULL, 0, "Don't clear the screen", 0 },
+	{ "all", 'a', NULL, 0, "Include special files", 0 },
+	{ "sort", 's', "SORT", 0, "Sort columns, default all [all, reads, writes, rbytes, wbytes]", 0 },
+	{ "rows", 'r', "ROWS", 0, "Maximum rows to print, default 20", 0 },
+	{ "verbose", 'v', NULL, 0, "Verbose debug output", 0 },
+	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help", 0 },
 	{},
 };
 
@@ -114,6 +117,9 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 		if (output_rows > OUTPUT_ROWS_LIMIT)
 			output_rows = OUTPUT_ROWS_LIMIT;
 		break;
+	case 'v':
+		verbose = true;
+		break;
 	case 'h':
 		argp_state_help(state, stderr, ARGP_HELP_STD_HELP);
 		break;
@@ -143,6 +149,13 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	return 0;
 }
 
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
+{
+	if (level == LIBBPF_DEBUG && !verbose)
+		return 0;
+	return vfprintf(stderr, format, args);
+}
+
 static void sig_int(int signo)
 {
 	exiting = 1;
@@ -169,26 +182,16 @@ static int sort_column(const void *obj1, const void *obj2)
 
 static int print_stat(struct filetop_bpf *obj)
 {
-	FILE *f;
-	time_t t;
-	struct tm *tm;
-	char ts[16], buf[256];
+	char loadavg[256], ts[64];
 	struct file_id key, *prev_key = NULL;
 	static struct file_stat values[OUTPUT_ROWS_LIMIT];
-	int n, i, err = 0, rows = 0;
+	int i, err = 0, rows = 0;
 	int fd = bpf_map__fd(obj->maps.entries);
 
-	f = fopen("/proc/loadavg", "r");
-	if (f) {
-		time(&t);
-		tm = localtime(&t);
-		strftime(ts, sizeof(ts), "%H:%M:%S", tm);
-		memset(buf, 0 , sizeof(buf));
-		n = fread(buf, 1, sizeof(buf), f);
-		if (n)
-			printf("%8s loadavg: %s\n", ts, buf);
-		fclose(f);
-	}
+	err = str_loadavg(loadavg, sizeof(loadavg)) <= 0;
+	err = err ?: (str_timestamp("%H:%M:%S", ts, sizeof(ts)) <= 0);
+	if (!err)
+		printf("%8s %s\n", ts, loadavg);
 
 	printf("%-7s %-16s %-6s %-6s %-7s %-7s %1s %s\n",
 	       "TID", "COMM", "READS", "WRITES", "R_Kb", "W_Kb", "T", "FILE");
@@ -244,6 +247,7 @@ static int print_stat(struct filetop_bpf *obj)
 
 int main(int argc, char **argv)
 {
+	LIBBPF_OPTS(bpf_object_open_opts, open_opts);
 	static const struct argp argp = {
 		.options = opts,
 		.parser = parse_arg,
@@ -256,13 +260,15 @@ int main(int argc, char **argv)
 	if (err)
 		return err;
 
-	err = bump_memlock_rlimit();
+	libbpf_set_print(libbpf_print_fn);
+
+	err = ensure_core_btf(&open_opts);
 	if (err) {
-		warn("failed to increase rlimit: %d\n", err);
+		fprintf(stderr, "failed to fetch necessary BTF for CO-RE: %s\n", strerror(-err));
 		return 1;
 	}
 
-	obj = filetop_bpf__open();
+	obj = filetop_bpf__open_opts(&open_opts);
 	if (!obj) {
 		warn("failed to open BPF object\n");
 		return 1;
@@ -309,6 +315,7 @@ int main(int argc, char **argv)
 
 cleanup:
 	filetop_bpf__destroy(obj);
+	cleanup_core_btf(&open_opts);
 
 	return err != 0;
 }

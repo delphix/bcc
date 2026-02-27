@@ -1,15 +1,35 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # Copyright (c) Sasha Goldshtein, 2017
 # Licensed under the Apache License, Version 2.0 (the "License")
 
-import distutils.version
 import subprocess
 import os
 import re
 from unittest import main, skipUnless, TestCase
 from utils import mayFail, kernel_version_ge
 
-TOOLS_DIR = "../../tools/"
+TOOLS_DIR = "/bcc/tools/"
+
+if not os.path.exists("/bcc/tools/"):
+    TOOLS_DIR = "../../tools/"
+
+def _helpful_rc_msg(rc, allow_early, kill):
+    s = "rc was %d\n" % rc
+    if rc == 0:
+        s += "\tMeaning: command returned successfully before test timeout\n"
+    elif rc == 124:
+        s += "\tMeaning: command was killed by INT signal\n"
+    elif rc == 137:
+        s += "\tMeaning: command was killed by KILL signal\n"
+
+    s += "Command was expected to do one of:\n"
+    s += "\tBe killed by SIGINT\n"
+    if kill:
+        s += "\tBe killed by SIGKILL\n"
+    if allow_early:
+        s += "\tSuccessfully return before being killed\n"
+
+    return s
 
 @skipUnless(kernel_version_ge(4,1), "requires kernel >= 4.1")
 class SmokeTests(TestCase):
@@ -39,11 +59,12 @@ class SmokeTests(TestCase):
         #   3. The script timed out and was killed by the SIGKILL signal, and
         #      this was what we asked for using kill=True.
         self.assertTrue((rc == 0 and allow_early) or rc == 124
-                        or (rc == 137 and kill), "rc was %d" % rc)
+                        or (rc == 137 and kill), _helpful_rc_msg(rc,
+                        allow_early, kill))
 
     def kmod_loaded(self, mod):
         with open("/proc/modules", "r") as mods:
-            reg = re.compile("^%s\s" % mod)
+            reg = re.compile(r'^%s\s' % mod)
             for line in mods:
                 if reg.match(line):
                     return 1
@@ -85,12 +106,18 @@ class SmokeTests(TestCase):
 
     def test_btrfsdist(self):
         # Will attempt to do anything meaningful only when btrfs is installed.
-        self.run_with_duration("btrfsdist.py 1 1")
+        if (self.kmod_loaded("btrfs")):
+            self.run_with_duration("btrfsdist.py 1 1")
+        else:
+            self.skipTest("skipped 'btrfs module not loaded'")
 
     @skipUnless(kernel_version_ge(4,4), "requires kernel >= 4.4")
     def test_btrfsslower(self):
         # Will attempt to do anything meaningful only when btrfs is installed.
-        self.run_with_int("btrfsslower.py", allow_early=True)
+        if (self.kmod_loaded("btrfs")):
+            self.run_with_int("btrfsslower.py", allow_early=True)
+        else:
+            self.skipTest("skipped 'btrfs module not loaded'")
 
     def test_cachestat(self):
         self.run_with_duration("cachestat.py 1 1")
@@ -159,6 +186,13 @@ class SmokeTests(TestCase):
         self.run_with_int("ext4slower.py")
 
     @skipUnless(kernel_version_ge(4,4), "requires kernel >= 4.4")
+    def test_f2fsslower(self):
+        if (self.kmod_loaded("f2fs")):
+            self.run_with_int("f2fsslower.py", allow_early=True)
+        else:
+            self.skipTest("skipped 'f2fs module not loaded'")
+
+    @skipUnless(kernel_version_ge(4,4), "requires kernel >= 4.4")
     def test_filelife(self):
         self.run_with_int("filelife.py")
 
@@ -170,15 +204,15 @@ class SmokeTests(TestCase):
         self.run_with_duration("filetop.py 1 1")
 
     def test_funccount(self):
-        self.run_with_int("funccount.py __kmalloc -i 1")
+        self.run_with_int("funccount.py __kmalloc_noprof -i 1")
 
     @skipUnless(kernel_version_ge(4,4), "requires kernel >= 4.4")
     def test_funclatency(self):
-        self.run_with_int("funclatency.py __kmalloc -i 1")
+        self.run_with_int("funclatency.py __kmalloc_noprof -i 1")
 
     @skipUnless(kernel_version_ge(4,4), "requires kernel >= 4.4")
     def test_funcslower(self):
-        self.run_with_int("funcslower.py __kmalloc")
+        self.run_with_int("funcslower.py __kmalloc_noprof")
 
     @skipUnless(kernel_version_ge(4,4), "requires kernel >= 4.4")
     def test_gethostlatency(self):
@@ -231,22 +265,23 @@ class SmokeTests(TestCase):
         if(self.kmod_loaded("nfs")):
             self.run_with_int("nfsslower.py")
         else:
-            pass
+            self.skipTest("skipped 'nfs module not loaded'")
 
     @skipUnless(kernel_version_ge(4,4), "requires kernel >= 4.4")
     def test_nfsdist(self):
         if(self.kmod_loaded("nfs")):
             self.run_with_duration("nfsdist.py 1 1")
         else:
-            pass
+            self.skipTest("skipped 'nfs module not loaded'")
 
     @skipUnless(kernel_version_ge(4,6), "requires kernel >= 4.6")
+    @mayFail("This fails on github actions environment, and needs to be fixed")
     def test_offcputime(self):
         self.run_with_duration("offcputime.py 1")
 
     @skipUnless(kernel_version_ge(4,6), "requires kernel >= 4.6")
     def test_offwaketime(self):
-        self.run_with_duration("offwaketime.py 1")
+        self.run_with_duration("offwaketime.py 1", timeout=30)
 
     @skipUnless(kernel_version_ge(4,9), "requires kernel >= 4.9")
     def test_oomkill(self):
@@ -258,6 +293,11 @@ class SmokeTests(TestCase):
 
     def test_pidpersec(self):
         self.run_with_int("pidpersec.py")
+
+    @skipUnless(kernel_version_ge(4,17), "requires kernel >= 4.17")
+    @mayFail("This fails on github actions environment, and needs to be fixed")
+    def test_syscount(self):
+        self.run_with_int("ppchcalls.py -i 1")
 
     @skipUnless(kernel_version_ge(4,9), "requires kernel >= 4.9")
     def test_profile(self):
@@ -286,6 +326,10 @@ class SmokeTests(TestCase):
         self.run_with_duration("softirqs.py 1 1")
         pass
 
+    @skipUnless(kernel_version_ge(4,7), "requires kernel >= 4.7")
+    def test_softirqslower(self):
+        self.run_with_int("softirqslower.py")
+
     @skipUnless(kernel_version_ge(4,4), "requires kernel >= 4.4")
     def test_solisten(self):
         self.run_with_int("solisten.py")
@@ -297,7 +341,7 @@ class SmokeTests(TestCase):
 
     @skipUnless(kernel_version_ge(4,6), "requires kernel >= 4.6")
     def test_stackcount(self):
-        self.run_with_int("stackcount.py __kmalloc -i 1")
+        self.run_with_int("stackcount.py __kmalloc_noprof -i 1")
 
     @skipUnless(kernel_version_ge(4,4), "requires kernel >= 4.4")
     def test_statsnoop(self):
@@ -339,6 +383,9 @@ class SmokeTests(TestCase):
     def test_tcptop(self):
         self.run_with_duration("tcptop.py 1 1")
 
+    def test_tcpcong(self):
+        self.run_with_duration("tcpcong.py 1 1")
+
     def test_tplist(self):
         self.run_with_duration("tplist.py -p %d" % os.getpid())
 
@@ -347,6 +394,7 @@ class SmokeTests(TestCase):
         self.run_with_int("trace.py do_sys_open")
 
     @skipUnless(kernel_version_ge(4,4), "requires kernel >= 4.4")
+    @mayFail("This fails on github actions environment, and needs to be fixed")
     def test_ttysnoop(self):
         self.run_with_int("ttysnoop.py /dev/console")
 
@@ -388,6 +436,10 @@ class SmokeTests(TestCase):
     @skipUnless(kernel_version_ge(4,6), "requires kernel >= 4.6")
     def test_wakeuptime(self):
         self.run_with_duration("wakeuptime.py 1")
+
+    @skipUnless(kernel_version_ge(4,7), "requires kernel >= 4.7")
+    def test_wqlat(self):
+        self.run_with_int("wqlat.py 1 1", allow_early=True)
 
     def test_xfsdist(self):
         # Doesn't work on build bot because xfs functions not present in the

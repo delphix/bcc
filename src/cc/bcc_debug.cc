@@ -19,6 +19,11 @@
 #include <tuple>
 #include <vector>
 
+#include "bcc_debug.h"
+
+#if LLVM_VERSION_MAJOR >= 15
+#include <llvm/DebugInfo/DWARF/DWARFCompileUnit.h>
+#endif
 #include <llvm/DebugInfo/DWARF/DWARFContext.h>
 #include <llvm/DebugInfo/DWARF/DWARFDebugLine.h>
 #include <llvm/IR/Module.h>
@@ -29,13 +34,14 @@
 #include <llvm/MC/MCInstrInfo.h>
 #include <llvm/MC/MCObjectFileInfo.h>
 #include <llvm/MC/MCRegisterInfo.h>
-#if LLVM_MAJOR_VERSION >= 14
+#if LLVM_VERSION_MAJOR >= 15
+#include <llvm/MC/MCSubtargetInfo.h>
+#endif
+#if LLVM_VERSION_MAJOR >= 14
 #include <llvm/MC/TargetRegistry.h>
 #else
 #include <llvm/Support/TargetRegistry.h>
 #endif
-
-#include "bcc_debug.h"
 
 namespace ebpf {
 
@@ -108,34 +114,40 @@ void SourceDebugger::getDebugSections(
 
 void SourceDebugger::dump() {
   string Error;
+#if LLVM_VERSION_MAJOR >= 21
+  string TripleStr(mod_->getTargetTriple().str());
+#else
   string TripleStr(mod_->getTargetTriple());
+#endif
   Triple TheTriple(TripleStr);
-  const Target *T = TargetRegistry::lookupTarget(TripleStr, Error);
+#if LLVM_VERSION_MAJOR >= 22
+  const Triple &TripleArg = TheTriple;
+#else
+  const string &TripleArg = TripleStr;
+#endif
+  const Target *T = TargetRegistry::lookupTarget(TripleArg, Error);
   if (!T) {
     errs() << "Debug Error: cannot get target\n";
     return;
   }
 
-  std::unique_ptr<MCRegisterInfo> MRI(T->createMCRegInfo(TripleStr));
+  std::unique_ptr<MCRegisterInfo> MRI(T->createMCRegInfo(TripleArg));
   if (!MRI) {
     errs() << "Debug Error: cannot get register info\n";
     return;
   }
-#if LLVM_MAJOR_VERSION >= 10
+
   MCTargetOptions MCOptions;
-  std::unique_ptr<MCAsmInfo> MAI(T->createMCAsmInfo(*MRI, TripleStr, MCOptions));
-#else
-  std::unique_ptr<MCAsmInfo> MAI(T->createMCAsmInfo(*MRI, TripleStr));
-#endif
+  std::unique_ptr<MCAsmInfo> MAI(T->createMCAsmInfo(*MRI, TripleArg, MCOptions));
   if (!MAI) {
     errs() << "Debug Error: cannot get assembly info\n";
     return;
   }
 
   std::unique_ptr<MCSubtargetInfo> STI(
-      T->createMCSubtargetInfo(TripleStr, "", ""));
+      T->createMCSubtargetInfo(TripleArg, "", ""));
   MCObjectFileInfo MOFI;
-#if LLVM_MAJOR_VERSION >= 13
+#if LLVM_VERSION_MAJOR >= 13
   MCContext Ctx(TheTriple, MAI.get(), MRI.get(), STI.get(), nullptr);
   Ctx.setObjectFileInfo(&MOFI);
   MOFI.initMCObjectFileInfo(Ctx, false, false);
@@ -168,13 +180,7 @@ void SourceDebugger::dump() {
     return;
   }
 
-  // bcc has only one compilation unit
-  // getCompileUnitAtIndex() was gone in llvm 8.0 (https://reviews.llvm.org/D49741)
-#if LLVM_MAJOR_VERSION >= 8
   DWARFCompileUnit *CU = cast<DWARFCompileUnit>(DwarfCtx->getUnitAtIndex(0));
-#else
-  DWARFCompileUnit *CU = DwarfCtx->getCompileUnitAtIndex(0);
-#endif
   if (!CU) {
     errs() << "Debug Error: dwarf context failed to get compile unit\n";
     return;
@@ -190,68 +196,57 @@ void SourceDebugger::dump() {
   vector<string> LineCache = buildLineCache();
 
   // Start to disassemble with source code annotation section by section
-  for (auto section : sections_)
-    if (!strncmp(fn_prefix_.c_str(), section.first.c_str(),
-                 fn_prefix_.size())) {
-      MCDisassembler::DecodeStatus S;
-      MCInst Inst;
-      uint64_t Size;
-      uint8_t *FuncStart = get<0>(section.second);
-      uint64_t FuncSize = get<1>(section.second);
-#if LLVM_MAJOR_VERSION >= 9
-      unsigned SectionID = get<2>(section.second);
-#endif
-      ArrayRef<uint8_t> Data(FuncStart, FuncSize);
-      uint32_t CurrentSrcLine = 0;
-      string func_name = section.first.substr(fn_prefix_.size());
+  prog_func_info_.for_each_func([&](std::string func_name, FuncInfo &info) {
+    MCDisassembler::DecodeStatus S;
+    MCInst Inst;
+    uint64_t Size;
+    uint8_t *FuncStart = info.start_;
+    uint64_t FuncSize = info.size_;
 
-      errs() << "Disassembly of section " << section.first << ":\n"
-             << func_name << ":\n";
-
-      string src_dbg_str;
-      llvm::raw_string_ostream os(src_dbg_str);
-      for (uint64_t Index = 0; Index < FuncSize; Index += Size) {
-#if LLVM_MAJOR_VERSION >= 10
-        S = DisAsm->getInstruction(Inst, Size, Data.slice(Index), Index,
-                                   nulls());
-#else
-        S = DisAsm->getInstruction(Inst, Size, Data.slice(Index), Index,
-                                   nulls(), nulls());
-#endif
-        if (S != MCDisassembler::Success) {
-          os << "Debug Error: disassembler failed: " << std::to_string(S)
+    auto section = sections_.find(info.section_);
+    if (section == sections_.end()) {
+      errs() << "Debug Error: no section entry for section " << info.section_
              << '\n';
-          break;
-        } else {
-          DILineInfo LineInfo;
-
-          LineTable->getFileLineInfoForAddress(
-#if LLVM_MAJOR_VERSION >= 9
-              {(uint64_t)FuncStart + Index, SectionID},
-#else
-              (uint64_t)FuncStart + Index,
-#endif
-              CU->getCompilationDir(),
-              DILineInfoSpecifier::FileLineInfoKind::AbsoluteFilePath,
-              LineInfo);
-
-          adjustInstSize(Size, Data[Index], Data[Index + 1]);
-          dumpSrcLine(LineCache, LineInfo.FileName, LineInfo.Line,
-                      CurrentSrcLine, os);
-          os << format("%4" PRIu64 ":", Index >> 3) << '\t';
-          dumpBytes(Data.slice(Index, Size), os);
-#if LLVM_MAJOR_VERSION >= 10
-          IP->printInst(&Inst, 0, "", *STI, os);
-#else
-          IP->printInst(&Inst, os, "", *STI);
-#endif
-          os << '\n';
-        }
-      }
-      os.flush();
-      errs() << src_dbg_str << '\n';
-      src_dbg_fmap_[func_name] = src_dbg_str;
+      return;
     }
+    unsigned SectionID = get<2>(section->second);
+
+    ArrayRef<uint8_t> Data(FuncStart, FuncSize);
+    uint32_t CurrentSrcLine = 0;
+
+    errs() << "Disassembly of function " << func_name << "\n";
+
+    string src_dbg_str;
+    llvm::raw_string_ostream os(src_dbg_str);
+    for (uint64_t Index = 0; Index < FuncSize; Index += Size) {
+      S = DisAsm->getInstruction(Inst, Size, Data.slice(Index), Index, nulls());
+      if (S != MCDisassembler::Success) {
+        os << "Debug Error: disassembler failed: " << std::to_string(S) << '\n';
+        break;
+      } else {
+        DILineInfo LineInfo;
+
+        LineTable->getFileLineInfoForAddress(
+            {(uint64_t)FuncStart + Index, SectionID},
+#if LLVM_VERSION_MAJOR >= 20
+            false,
+#endif
+            CU->getCompilationDir(),
+            DILineInfoSpecifier::FileLineInfoKind::AbsoluteFilePath, LineInfo);
+
+        adjustInstSize(Size, Data[Index], Data[Index + 1]);
+        dumpSrcLine(LineCache, LineInfo.FileName, LineInfo.Line, CurrentSrcLine,
+                    os);
+        os << format("%4" PRIu64 ":", Index >> 3) << '\t';
+        dumpBytes(Data.slice(Index, Size), os);
+        IP->printInst(&Inst, 0, "", *STI, os);
+        os << '\n';
+      }
+    }
+    os.flush();
+    errs() << src_dbg_str << '\n';
+    src_dbg_fmap_[func_name] = src_dbg_str;
+  });
 }
 
 }  // namespace ebpf

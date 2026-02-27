@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 #
 # tcpv4tracer   Trace TCP connections.
 #               For Linux, uses BCC, eBPF. Embedded C.
@@ -190,7 +190,7 @@ int trace_connect_v4_entry(struct pt_regs *ctx, struct sock *sk)
   u64 pid = bpf_get_current_pid_tgid();
 
   ##FILTER_PID##
-  
+
   u16 family = sk->__sk_common.skc_family;
   ##FILTER_FAMILY##
 
@@ -296,7 +296,7 @@ int trace_tcp_set_state_entry(struct pt_regs *ctx, struct sock *skp, int state)
 
   u16 family = skp->__sk_common.skc_family;
   ##FILTER_FAMILY##
-  
+
   u8 ipver = 0;
   if (check_family(skp, AF_INET)) {
       ipver = 4;
@@ -385,7 +385,7 @@ int trace_close_entry(struct pt_regs *ctx, struct sock *skp)
   u64 pid = bpf_get_current_pid_tgid();
 
   ##FILTER_PID##
-  
+
   u16 family = skp->__sk_common.skc_family;
   ##FILTER_FAMILY##
 
@@ -473,7 +473,7 @@ int trace_accept_return(struct pt_regs *ctx)
 #endif
 
   ##FILTER_NETNS##
-  
+
   u16 family = newsk->__sk_common.skc_family;
   ##FILTER_FAMILY##
 
@@ -668,15 +668,6 @@ else:
           ("T", "PID", "COMM", "IP", "SADDR", "DADDR", "SPORT", "DPORT"))
 
 start_ts = 0
-
-def inet_ntoa(addr):
-    dq = ''
-    for i in range(0, 4):
-        dq = dq + str(addr & 0xff)
-        if (i != 3):
-            dq = dq + '.'
-        addr = addr >> 8
-    return dq
 
 
 b["tcp_ipv4_event"].open_perf_buffer(print_ipv4_event)

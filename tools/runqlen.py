@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # @lint-avoid-python-3-compatibility-imports
 #
 # runqlen    Summarize scheduler run queue length as a histogram.
@@ -20,7 +20,7 @@
 # 12-Dec-2016   Brendan Gregg   Created this.
 
 from __future__ import print_function
-from bcc import BPF, PerfType, PerfSWConfig
+from bcc import BPF, PerfType, PerfSWConfig, utils
 from time import sleep, strftime
 from tempfile import NamedTemporaryFile
 from os import open, close, dup, unlink, O_WRONLY
@@ -90,7 +90,7 @@ unsigned long dummy(struct sched_entity *entity)
 
     # Get a temporary file name
     tmp_file = NamedTemporaryFile(delete=False)
-    tmp_file.close();
+    tmp_file.close()
 
     # Duplicate and close stderr (fd = 2)
     old_stderr = dup(2)
@@ -122,9 +122,12 @@ bpf_text = """
 
 // Declare enough of cfs_rq to find nr_running, since we can't #import the
 // header. This will need maintenance. It is from kernel/sched/sched.h:
+// The runnable_weight field is removed from Linux 5.7.0
 struct cfs_rq_partial {
     struct load_weight load;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0)
     RUNNABLE_WEIGHT_FIELD
+#endif
     unsigned int nr_running, h_nr_running;
 };
 
@@ -163,7 +166,7 @@ int do_perf_event()
 # code substitutions
 if args.cpus:
     bpf_text = bpf_text.replace('STORAGE',
-        'BPF_HISTOGRAM(dist, cpu_key_t);')
+        'BPF_HISTOGRAM(dist, cpu_key_t, MAX_CPUS);')
     bpf_text = bpf_text.replace('STORE', 'cpu_key_t key = {.slot = len}; ' +
         'key.cpu = bpf_get_smp_processor_id(); ' +
         'dist.increment(key);')
@@ -172,7 +175,10 @@ else:
         'BPF_HISTOGRAM(dist, unsigned int);')
     bpf_text = bpf_text.replace('STORE', 'dist.atomic_increment(len);')
 
-if check_runnable_weight_field():
+# If target has BTF enabled, use BTF to check runnable_weight field exists in
+# cfs_rq first, otherwise fallback to use check_runnable_weight_field().
+if BPF.kernel_struct_has_field(b'cfs_rq', b'runnable_weight') == 1 \
+        or check_runnable_weight_field():
     bpf_text = bpf_text.replace('RUNNABLE_WEIGHT_FIELD', 'unsigned long runnable_weight;')
 else:
     bpf_text = bpf_text.replace('RUNNABLE_WEIGHT_FIELD', '')
@@ -182,8 +188,10 @@ if debug or args.ebpf:
     if args.ebpf:
         exit()
 
+num_cpus = len(utils.get_online_cpus())
+
 # initialize BPF & perf_events
-b = BPF(text=bpf_text)
+b = BPF(text=bpf_text, cflags=['-DMAX_CPUS=%s' % str(num_cpus)])
 b.attach_perf_event(ev_type=PerfType.SOFTWARE,
     ev_config=PerfSWConfig.CPU_CLOCK, fn_name="do_perf_event",
     sample_period=0, sample_freq=frequency)

@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # @lint-avoid-python-3-compatibility-imports
 #
 # cpuunclaimed   Sample CPU run queues and calculate unclaimed idle CPU.
@@ -61,7 +61,7 @@ from bcc import BPF, PerfType, PerfSWConfig
 from time import sleep, strftime
 import argparse
 import multiprocessing
-from os import getpid, system, open, close, dup, unlink, O_WRONLY
+from os import open, close, dup, unlink, O_WRONLY
 from tempfile import NamedTemporaryFile
 
 # arguments
@@ -164,7 +164,7 @@ if args.csv:
     interval = 0.2
 if args.interval != -1 and (args.fullcsv or args.csv):
     print("ERROR: cannot use interval with either -j or -J. Exiting.")
-    exit()
+    exit(1)
 if args.interval == -1:
     args.interval = "1"
 interval = float(args.interval)
@@ -185,9 +185,12 @@ BPF_PERF_OUTPUT(events);
 
 // Declare enough of cfs_rq to find nr_running, since we can't #import the
 // header. This will need maintenance. It is from kernel/sched/sched.h:
+// The runnable_weight field is removed from Linux 5.7.0
 struct cfs_rq_partial {
     struct load_weight load;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0)
     RUNNABLE_WEIGHT_FIELD
+#endif
     unsigned int nr_running, h_nr_running;
 };
 
@@ -216,7 +219,10 @@ int do_perf_event(struct bpf_perf_event_data *ctx)
 }
 """
 
-if check_runnable_weight_field():
+# If target has BTF enabled, use BTF to check runnable_weight field exists in
+# cfs_rq first, otherwise fallback to use check_runnable_weight_field().
+if BPF.kernel_struct_has_field(b'cfs_rq', b'runnable_weight') == 1 \
+        or check_runnable_weight_field():
     bpf_text = bpf_text.replace('RUNNABLE_WEIGHT_FIELD', 'unsigned long runnable_weight;')
 else:
     bpf_text = bpf_text.replace('RUNNABLE_WEIGHT_FIELD', '')

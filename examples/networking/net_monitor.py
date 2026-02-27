@@ -2,8 +2,8 @@
 #
 # net_monitor.py Aggregates incoming network traffic
 # outputs source ip, destination ip, the number of their network traffic, and current time
-# how to use : net_monitor.py <net_interface> 
-# 
+# how to use : net_monitor.py <net_interface>
+#
 # Copyright (c) 2020 YoungEun Choe
 
 from bcc import BPF
@@ -34,7 +34,7 @@ bpf_text = """
 #define ETH_HLEN 14
 
 BPF_PERF_OUTPUT(skb_events);
-BPF_HASH(packet_cnt, u64, long, 256); 
+BPF_HASH(packet_cnt, u64, long, 256);
 
 int packet_monitor(struct __sk_buff *skb) {
     u8 *cursor = 0;
@@ -42,19 +42,20 @@ int packet_monitor(struct __sk_buff *skb) {
     long* count = 0;
     long one = 1;
     u64 pass_value = 0;
-    
-    struct ethernet_t *ethernet = cursor_advance(cursor, sizeof(*ethernet));
 
+    struct ethernet_t *ethernet = cursor_advance(cursor, sizeof(*ethernet));
     struct ip_t *ip = cursor_advance(cursor, sizeof(*ip));
-    if (ip->nextp != IP_TCP) 
+    if (ip->ver != 4)
+        return 0;
+    if (ip->nextp != IP_TCP)
     {
-        if (ip -> nextp != IP_UDP) 
+        if (ip -> nextp != IP_UDP)
         {
-            if (ip -> nextp != IP_ICMP) 
-                return 0; 
+            if (ip -> nextp != IP_ICMP)
+                return 0;
         }
     }
-    
+
     saddr = ip -> src;
     daddr = ip -> dst;
 
@@ -62,7 +63,7 @@ int packet_monitor(struct __sk_buff *skb) {
     pass_value = pass_value << 32;
     pass_value = pass_value + daddr;
 
-    count = packet_cnt.lookup(&pass_value); 
+    count = packet_cnt.lookup(&pass_value);
     if (count)  // check if this map exists
         *count += 1;
     else        // if the map for the key doesn't exist, create one
@@ -80,6 +81,9 @@ import sys
 import socket
 import os
 import struct
+import ipaddress
+import ctypes
+from datetime import datetime
 
 OUTPUT_INTERVAL = 1
 
@@ -89,44 +93,39 @@ function_skb_matching = bpf.load_func("packet_monitor", BPF.SOCKET_FILTER)
 
 BPF.attach_raw_socket(function_skb_matching, INTERFACE)
 
-    # retrieeve packet_cnt map
-packet_cnt = bpf.get_table('packet_cnt')    # retrieeve packet_cnt map
+    # retrieve packet_cnt map
+packet_cnt = bpf.get_table('packet_cnt')    # retrieve packet_cnt map
 
 def decimal_to_human(input_value):
-    input_value = int(input_value)
-    hex_value = hex(input_value)[2:]
-    pt3 = literal_eval((str('0x'+str(hex_value[-2:]))))
-    pt2 = literal_eval((str('0x'+str(hex_value[-4:-2]))))
-    pt1 = literal_eval((str('0x'+str(hex_value[-6:-4]))))
-    pt0 = literal_eval((str('0x'+str(hex_value[-8:-6]))))
-    result = str(pt0)+'.'+str(pt1)+'.'+str(pt2)+'.'+str(pt3)
-    return result
+    try:
+        decimal_ip = int(input_value)
+        ip_string = str(ipaddress.IPv4Address(decimal_ip))
+        return ip_string
+    except ValueError:
+        return "Invalid input"
 
 try:
     while True :
         time.sleep(OUTPUT_INTERVAL)
         packet_cnt_output = packet_cnt.items()
         output_len = len(packet_cnt_output)
-        print('\n')
+        current_time = datetime.now()
+        formatted_time = current_time.strftime("%Y-%m-%d %H:%M:%S")
+        if output_len != 0:
+            print('\ncurrent packet nums:')
+
         for i in range(0,output_len):
-            if (len(str(packet_cnt_output[i][0]))) != 30:
-                continue
-            temp = int(str(packet_cnt_output[i][0])[8:-2]) # initial output omitted from the kernel space program
-            temp = int(str(bin(temp))[2:]) # raw file
-            src = int(str(temp)[:32],2) # part1 
-            dst = int(str(temp)[32:],2)
-            pkt_num = str(packet_cnt_output[i][1])[7:-1]
+            srcdst = packet_cnt_output[i][0].value
+            src = (srcdst >> 32) & 0xFFFFFFFF
+            dst = srcdst & 0xFFFFFFFF
+            pkt_num = packet_cnt_output[i][1].value
 
             monitor_result = 'source address : ' + decimal_to_human(str(src)) + ' ' + 'destination address : ' + \
-            decimal_to_human(str(dst)) + ' ' + pkt_num + ' ' + 'time : ' + str(time.localtime()[0])+\
-            ';'+str(time.localtime()[1]).zfill(2)+';'+str(time.localtime()[2]).zfill(2)+';'+\
-            str(time.localtime()[3]).zfill(2)+';'+str(time.localtime()[4]).zfill(2)+';'+\
-            str(time.localtime()[5]).zfill(2)
+            decimal_to_human(str(dst)) + ' ' + str(pkt_num) + ' ' + 'time : ' + formatted_time
             print(monitor_result)
 
-            # time.time() outputs time elapsed since 00:00 hours, 1st, Jan., 1970.
-        packet_cnt.clear() # delete map entires after printing output. confiremd it deletes values and keys too 
-        
+        packet_cnt.clear() # delete map entries after printing output. confirmed it deletes values and keys too
+
 except KeyboardInterrupt:
     sys.stdout.close()
     pass

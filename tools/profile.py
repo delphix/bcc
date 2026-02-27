@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # @lint-avoid-python-3-compatibility-imports
 #
 # profile  Profile CPU usage by sampling stack traces at a timed interval.
@@ -26,15 +26,16 @@
 # 20-Oct-2016      "      "     Switched to use the new 4.9 support.
 # 26-Jan-2019      "      "     Changed to exclude CPU idle by default.
 # 11-Apr-2023   Rocky Xing      Added option to increase hash storage size.
+# 14-Feb-2025   Rocky Xing      Prioritized using the cpu-cycles hardware event.
 
 from __future__ import print_function
-from bcc import BPF, PerfType, PerfSWConfig
+from bcc import BPF, PerfType, PerfSWConfig, PerfHWConfig
 from bcc.containers import filter_by_containers
 from sys import stderr
 from time import sleep
+from os import open, close, dup, stat, uname, devnull, O_WRONLY
 import argparse
 import signal
-import os
 import errno
 
 #
@@ -51,6 +52,13 @@ def positive_int(val):
     if ival < 0:
         raise argparse.ArgumentTypeError("must be positive")
     return ival
+
+def positive_int_list(val):
+    vlist = val.split(",")
+    if len(vlist) <= 0:
+        raise argparse.ArgumentTypeError("must be an integer list")
+
+    return [positive_int(v) for v in vlist]
 
 def positive_nonzero_int(val):
     ival = positive_int(val)
@@ -82,10 +90,10 @@ parser = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
     epilog=examples)
 thread_group = parser.add_mutually_exclusive_group()
-thread_group.add_argument("-p", "--pid", type=positive_int,
-    help="profile process with this PID only")
-thread_group.add_argument("-L", "--tid", type=positive_int,
-    help="profile thread with this TID only")
+thread_group.add_argument("-p", "--pid", type=positive_int_list,
+    help="profile processes with one or more comma-separated PIDs only")
+thread_group.add_argument("-L", "--tid", type=positive_int_list,
+    help="profile threads with one or more comma-separated TIDs only")
 # TODO: add options for user/kernel threads only
 stack_group = parser.add_mutually_exclusive_group()
 stack_group.add_argument("-U", "--user-stacks-only", action="store_true",
@@ -123,10 +131,11 @@ parser.add_argument("--cgroupmap",
     help="trace cgroups in this BPF map only")
 parser.add_argument("--mntnsmap",
     help="trace mount namespaces in this BPF map only")
+parser.add_argument("-A", "--address", action="store_true",
+    help="show raw addresses")
 
 # option logic
 args = parser.parse_args()
-pid = int(args.pid) if args.pid is not None else -1
 duration = int(args.duration)
 debug = 0
 need_delimiter = args.delimited and not (args.kernel_stacks_only or
@@ -156,9 +165,18 @@ BPF_STACK_TRACE(stack_traces, STACK_STORAGE_SIZE);
 // This code gets a bit complex. Probably not suitable for casual hacking.
 
 int do_perf_event(struct bpf_perf_event_data *ctx) {
-    u64 id = bpf_get_current_pid_tgid();
-    u32 tgid = id >> 32;
-    u32 pid = id;
+    u32 tgid = 0;
+    u32 pid = 0;
+
+    struct bpf_pidns_info ns = {};
+    if (USE_PIDNS && !bpf_get_ns_current_pid_tgid(PIDNS_DEV, PIDNS_INO, &ns, sizeof(struct bpf_pidns_info))) {
+        tgid = ns.tgid;
+        pid = ns.pid;
+    } else {
+        u64 id = bpf_get_current_pid_tgid();
+        tgid = id >> 32;
+        pid = id;
+    }
 
     if (IDLE_FILTER)
         return 0;
@@ -194,9 +212,14 @@ int do_perf_event(struct bpf_perf_event_data *ctx) {
 #else
         page_offset = __PAGE_OFFSET_BASE_L4;
 #endif
+#elif defined(__identity_base)
+        // s390 6.10 and later PAGE_OFFSET is not a constant and need
+        // to be read from the kernel address space
+        bpf_probe_read_kernel(&page_offset, sizeof(PAGE_OFFSET), &PAGE_OFFSET);
 #else
         // earlier x86_64 kernels, e.g., 4.6, comes here
-        // arm64, s390, powerpc, x86_32
+        // s390 before 6.10
+        // arm64, powerpc, x86_32
         page_offset = PAGE_OFFSET;
 #endif
 
@@ -210,6 +233,20 @@ int do_perf_event(struct bpf_perf_event_data *ctx) {
 }
 """
 
+# pid-namespace translation
+try:
+    devinfo = stat("/proc/self/ns/pid")
+    version = "".join([ver.zfill(2) for ver in uname().release.split(".")])
+    # Need Linux >= 5.7 to have helper bpf_get_ns_current_pid_tgid() available:
+    assert(version[:4] >= "0507")
+    bpf_text = bpf_text.replace('USE_PIDNS', "1")
+    bpf_text = bpf_text.replace('PIDNS_DEV', str(devinfo.st_dev))
+    bpf_text = bpf_text.replace('PIDNS_INO', str(devinfo.st_ino))
+except:
+    bpf_text = bpf_text.replace('USE_PIDNS', "0")
+    bpf_text = bpf_text.replace('PIDNS_DEV', "0")
+    bpf_text = bpf_text.replace('PIDNS_INO', "0")
+
 # set idle filter
 idle_filter = "pid == 0"
 if args.include_idle:
@@ -218,12 +255,13 @@ bpf_text = bpf_text.replace('IDLE_FILTER', idle_filter)
 
 # set process/thread filter
 thread_context = ""
+thread_filter = ""
 if args.pid is not None:
     thread_context = "PID %s" % args.pid
-    thread_filter = 'tgid == %s' % args.pid
+    thread_filter = " || ".join("tgid == " + str(pid) for pid in args.pid)
 elif args.tid is not None:
     thread_context = "TID %s" % args.tid
-    thread_filter = 'pid == %s' % args.tid
+    thread_filter = " || ".join("pid == " + str(tid) for tid in args.tid)
 else:
     thread_context = "all threads"
     thread_filter = '1'
@@ -279,9 +317,29 @@ if debug or args.ebpf:
 
 # initialize BPF & perf_events
 b = BPF(text=bpf_text)
-b.attach_perf_event(ev_type=PerfType.SOFTWARE,
-    ev_config=PerfSWConfig.CPU_CLOCK, fn_name="do_perf_event",
-    sample_period=sample_period, sample_freq=sample_freq, cpu=args.cpu)
+
+# Duplicate and close stderr (fd = 2)
+old_stderr = dup(2)
+close(2)
+
+# Open a new file, should get fd number 2
+# This will avoid printing perf_event_open error on the screen
+fd = open(devnull, O_WRONLY)
+
+try:
+    b.attach_perf_event(ev_type=PerfType.HARDWARE,
+        ev_config=PerfHWConfig.CPU_CYCLES, fn_name="do_perf_event",
+        sample_period=sample_period, sample_freq=sample_freq, cpu=args.cpu)
+except Exception:
+    # The cpu-cycles hardware event not supported, fall back to cpu-clock
+    b.attach_perf_event(ev_type=PerfType.SOFTWARE,
+        ev_config=PerfSWConfig.CPU_CLOCK, fn_name="do_perf_event",
+        sample_period=sample_period, sample_freq=sample_freq, cpu=args.cpu)
+finally:
+    # Release the fd 2, and next dup should restore old stderr
+    close(fd)
+    dup(old_stderr)
+    close(old_stderr)
 
 # signal handler
 def signal_ignore(signal, frame):
@@ -341,21 +399,21 @@ for k, v in sorted(counts.items(), key=lambda counts: counts[1].value):
         # print folded stack output
         user_stack = list(user_stack)
         kernel_stack = list(kernel_stack)
-        line = [k.name]
+        line = [k.name.decode('utf-8', 'replace')]
         # if we failed to get the stack is, such as due to no space (-ENOMEM) or
         # hash collision (-EEXIST), we still print a placeholder for consistency
         if not args.kernel_stacks_only:
             if stack_id_err(k.user_stack_id):
-                line.append(b"[Missed User Stack]")
+                line.append("[Missed User Stack]")
             else:
-                line.extend([b.sym(addr, k.pid) for addr in reversed(user_stack)])
+                line.extend([b.sym(addr, k.pid).decode('utf-8', 'replace') for addr in reversed(user_stack)])
         if not args.user_stacks_only:
-            line.extend([b"-"] if (need_delimiter and k.kernel_stack_id >= 0 and k.user_stack_id >= 0) else [])
+            line.extend(["-"] if (need_delimiter and k.kernel_stack_id >= 0 and k.user_stack_id >= 0) else [])
             if stack_id_err(k.kernel_stack_id):
-                line.append(b"[Missed Kernel Stack]")
+                line.append("[Missed Kernel Stack]")
             else:
-                line.extend([aksym(addr) for addr in reversed(kernel_stack)])
-        print("%s %d" % (b";".join(line).decode('utf-8', 'replace'), v.value))
+                line.extend([aksym(addr).decode('utf-8', 'replace') for addr in reversed(kernel_stack)])
+        print("%s %d" % (";".join(line), v.value))
     else:
         # print default multi-line stack output
         if not args.user_stacks_only:
@@ -363,7 +421,12 @@ for k, v in sorted(counts.items(), key=lambda counts: counts[1].value):
                 print("    [Missed Kernel Stack]")
             else:
                 for addr in kernel_stack:
-                    print("    %s" % aksym(addr))
+                    sym_info = b.ksym(addr, True, True).decode('utf-8', 'replace')
+                    if args.address:
+                        print("    0x%-16x %s" % (addr, sym_info))
+                    else:
+                        print("    %s" % sym_info)
+
         if not args.kernel_stacks_only:
             if need_delimiter and k.user_stack_id >= 0 and k.kernel_stack_id >= 0:
                 print("    --")
@@ -371,7 +434,11 @@ for k, v in sorted(counts.items(), key=lambda counts: counts[1].value):
                 print("    [Missed User Stack]")
             else:
                 for addr in user_stack:
-                    print("    %s" % b.sym(addr, k.pid).decode('utf-8', 'replace'))
+                    sym_info = b.sym(addr, k.pid, True, True).decode('utf-8', 'replace')
+                    if args.address:
+                        print("    0x%016x %s" % (addr, sym_info))
+                    else:
+                        print("    %s" % sym_info)
         print("    %-16s %s (%d)" % ("-", k.name.decode('utf-8', 'replace'), k.pid))
         print("        %d\n" % v.value)
 

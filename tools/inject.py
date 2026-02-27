@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 #
 # This script generates a BPF program with structure inspired by trace.py. The
 # generated program operates on PID-indexed stacks. Generally speaking,
@@ -178,7 +178,7 @@ class Probe:
         if (p->stack[p->conds_met - 1] == p->curr_call)
                 p->conds_met--;
         """
-        return text % str(self.length + 1)
+        return text % str(self.length)
 
     def _generate_exit(self):
         prog = self._get_heading() + """

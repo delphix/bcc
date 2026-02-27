@@ -47,13 +47,46 @@ void BPFModule::cleanup_rw_engine() {
   rw_engine_.reset();
 }
 
+static LoadInst *createLoad(IRBuilder<> &B, Value *addr, bool isVolatile = false)
+{
+#if LLVM_VERSION_MAJOR >= 15
+  if (isa<AllocaInst>(addr))
+    return B.CreateLoad(dyn_cast<AllocaInst>(addr)->getAllocatedType(), addr, isVolatile);
+  else
+    return B.CreateLoad(addr->getType(), addr, isVolatile);
+#elif LLVM_VERSION_MAJOR >= 13
+  return B.CreateLoad(addr->getType()->getPointerElementType(), addr, isVolatile);
+#else
+  return B.CreateLoad(addr, isVolatile);
+#endif
+}
+
+static Value *createInBoundsGEP(IRBuilder<> &B, Value *ptr, ArrayRef<Value *>idxlist)
+{
+#if LLVM_VERSION_MAJOR >= 15
+  if (isa<GlobalValue>(ptr))
+    return B.CreateInBoundsGEP(dyn_cast<GlobalValue>(ptr)->getValueType(), ptr, idxlist);
+  else
+    return B.CreateInBoundsGEP(ptr->getType(), ptr, idxlist);
+#elif LLVM_VERSION_MAJOR >= 13
+  return B.CreateInBoundsGEP(ptr->getType()->getScalarType()->getPointerElementType(),
+                             ptr, idxlist);
+#else
+  return B.CreateInBoundsGEP(ptr, idxlist);
+#endif
+}
+
 static void debug_printf(Module *mod, IRBuilder<> &B, const string &fmt, vector<Value *> args) {
   GlobalVariable *fmt_gvar = B.CreateGlobalString(fmt, "fmt");
-  args.insert(args.begin(), B.CreateInBoundsGEP(fmt_gvar, vector<Value *>({B.getInt64(0), B.getInt64(0)})));
+  args.insert(args.begin(), createInBoundsGEP(B, fmt_gvar, vector<Value *>({B.getInt64(0), B.getInt64(0)})));
   args.insert(args.begin(), B.getInt64((uintptr_t)stderr));
   Function *fprintf_fn = mod->getFunction("fprintf");
   if (!fprintf_fn) {
+#if LLVM_VERSION_MAJOR >= 18
+    vector<Type *> fprintf_fn_args({B.getInt64Ty(), B.getPtrTy()});
+#else
     vector<Type *> fprintf_fn_args({B.getInt64Ty(), B.getInt8PtrTy()});
+#endif
     FunctionType *fprintf_fn_type = FunctionType::get(B.getInt32Ty(), fprintf_fn_args, /*isvarArg=*/true);
     fprintf_fn = Function::Create(fprintf_fn_type, GlobalValue::ExternalLinkage, "fprintf", mod);
     fprintf_fn->setCallingConv(CallingConv::C);
@@ -76,8 +109,8 @@ static void finish_sscanf(IRBuilder<> &B, vector<Value *> *args, string *fmt,
   *fmt += "%n";
   B.CreateStore(B.getInt32(0), nread);
   GlobalVariable *fmt_gvar = B.CreateGlobalString(*fmt, "fmt");
-  (*args)[1] = B.CreateInBoundsGEP(fmt_gvar, {B.getInt64(0), B.getInt64(0)});
-  (*args)[0] = B.CreateLoad(sptr);
+  (*args)[1] = createInBoundsGEP(B, fmt_gvar, {B.getInt64(0), B.getInt64(0)});
+  (*args)[0] = createLoad(B, sptr);
   args->push_back(nread);
   CallInst *call = B.CreateCall(sscanf_fn, *args);
   call->setTailCall(true);
@@ -96,8 +129,17 @@ static void finish_sscanf(IRBuilder<> &B, vector<Value *> *args, string *fmt,
 
   B.SetInsertPoint(label_false);
   // s = &s[nread];
+#if LLVM_VERSION_MAJOR >= 15
+  // cast `sptr` from `ptr`(an opaque pointer rather than `i8*`) to `i8`, so that
+  // CreateInBoundsGEP can work properly, i.e. the offset is in bytes not in pointer-size
   B.CreateStore(
-      B.CreateInBoundsGEP(B.CreateLoad(sptr), B.CreateLoad(nread, true)), sptr);
+      B.CreateInBoundsGEP(B.getInt8Ty(), createLoad(B, sptr), {createLoad(B, nread, true)}),
+      sptr
+  );
+#else
+  B.CreateStore(
+      createInBoundsGEP(B, createLoad(B, sptr), {createLoad(B, nread, true)}), sptr);
+#endif
 
   args->resize(2);
   fmt->clear();
@@ -196,7 +238,7 @@ static void parse_type(IRBuilder<> &B, vector<Value *> *args, string *fmt,
       *fmt += "x";
     else
       *fmt += "i";
-    args->push_back(is_writer ? B.CreateLoad(out) : out);
+    args->push_back(is_writer ? createLoad(B, out) : out);
   }
 }
 
@@ -229,7 +271,11 @@ string BPFModule::make_reader(Module *mod, Type *type) {
   IRBuilder<> B(*ctx_);
 
   FunctionType *sscanf_fn_type = FunctionType::get(
+#if LLVM_VERSION_MAJOR >= 18
+      B.getInt32Ty(), {B.getPtrTy(), B.getPtrTy()}, /*isVarArg=*/true);
+#else
       B.getInt32Ty(), {B.getInt8PtrTy(), B.getInt8PtrTy()}, /*isVarArg=*/true);
+#endif
   Function *sscanf_fn = mod->getFunction("sscanf");
   if (!sscanf_fn) {
     sscanf_fn = Function::Create(sscanf_fn_type, GlobalValue::ExternalLinkage,
@@ -239,7 +285,11 @@ string BPFModule::make_reader(Module *mod, Type *type) {
   }
 
   string name = "reader" + std::to_string(readers_.size());
+#if LLVM_VERSION_MAJOR >= 18
+  vector<Type *> fn_args({B.getPtrTy(), PointerType::getUnqual(type)});
+#else
   vector<Type *> fn_args({B.getInt8PtrTy(), PointerType::getUnqual(type)});
+#endif
   FunctionType *fn_type = FunctionType::get(B.getInt32Ty(), fn_args, /*isVarArg=*/false);
   Function *fn =
       Function::Create(fn_type, GlobalValue::ExternalLinkage, name, mod);
@@ -255,7 +305,11 @@ string BPFModule::make_reader(Module *mod, Type *type) {
   B.SetInsertPoint(label_entry);
 
   Value *nread = B.CreateAlloca(B.getInt32Ty());
+#if LLVM_VERSION_MAJOR >= 18
+  Value *sptr = B.CreateAlloca(B.getPtrTy());
+#else
   Value *sptr = B.CreateAlloca(B.getInt8PtrTy());
+#endif
   map<string, Value *> locals{{"nread", nread}, {"sptr", sptr}};
   B.CreateStore(arg_in, sptr);
   vector<Value *> args({nullptr, nullptr});
@@ -299,7 +353,11 @@ string BPFModule::make_writer(Module *mod, Type *type) {
   IRBuilder<> B(*ctx_);
 
   string name = "writer" + std::to_string(writers_.size());
+#if LLVM_VERSION_MAJOR >= 18
+  vector<Type *> fn_args({B.getPtrTy(), B.getInt64Ty(), PointerType::getUnqual(type)});
+#else
   vector<Type *> fn_args({B.getInt8PtrTy(), B.getInt64Ty(), PointerType::getUnqual(type)});
+#endif
   FunctionType *fn_type = FunctionType::get(B.getInt32Ty(), fn_args, /*isVarArg=*/false);
   Function *fn =
       Function::Create(fn_type, GlobalValue::ExternalLinkage, name, mod);
@@ -326,12 +384,16 @@ string BPFModule::make_writer(Module *mod, Type *type) {
 
   GlobalVariable *fmt_gvar = B.CreateGlobalString(fmt, "fmt");
 
-  args[2] = B.CreateInBoundsGEP(fmt_gvar, vector<Value *>({B.getInt64(0), B.getInt64(0)}));
+  args[2] = createInBoundsGEP(B, fmt_gvar, vector<Value *>({B.getInt64(0), B.getInt64(0)}));
 
   if (0)
     debug_printf(mod, B, "%d %p %p\n", vector<Value *>({arg_len, arg_out, arg_in}));
 
+#if LLVM_VERSION_MAJOR >= 18
+  vector<Type *> snprintf_fn_args({B.getPtrTy(), B.getInt64Ty(), B.getPtrTy()});
+#else
   vector<Type *> snprintf_fn_args({B.getInt8PtrTy(), B.getInt64Ty(), B.getInt8PtrTy()});
+#endif
   FunctionType *snprintf_fn_type = FunctionType::get(B.getInt32Ty(), snprintf_fn_args, /*isVarArg=*/true);
   Function *snprintf_fn = mod->getFunction("snprintf");
   if (!snprintf_fn)
@@ -356,7 +418,7 @@ unique_ptr<ExecutionEngine> BPFModule::finalize_rw(unique_ptr<Module> m) {
   string err;
   EngineBuilder builder(move(m));
   builder.setErrorStr(&err);
-#if LLVM_MAJOR_VERSION <= 11
+#if LLVM_VERSION_MAJOR <= 11
   builder.setUseOrcMCJITReplacement(false);
 #endif
   auto engine = unique_ptr<ExecutionEngine>(builder.create());
@@ -381,8 +443,15 @@ int BPFModule::annotate() {
     table_names_[table.name] = id++;
     GlobalValue *gvar = mod_->getNamedValue(table.name);
     if (!gvar) continue;
+#if LLVM_VERSION_MAJOR >= 14
+    {
+      Type *t = gvar->getValueType();
+      StructType *st = dyn_cast<StructType>(t);
+#else
     if (PointerType *pt = dyn_cast<PointerType>(gvar->getType())) {
-      if (StructType *st = dyn_cast<StructType>(pt->getElementType())) {
+      StructType *st = dyn_cast<StructType>(pt->getElementType());
+#endif
+      if (st) {
         if (st->getNumElements() < 2) continue;
         Type *key_type = st->elements()[0];
         Type *leaf_type = st->elements()[1];

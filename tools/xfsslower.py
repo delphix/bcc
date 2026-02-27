@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # @lint-avoid-python-3-compatibility-imports
 #
 # xfsslower  Trace slow XFS operations.
@@ -68,6 +68,11 @@ bpf_text = """
 #define TRACE_OPEN      2
 #define TRACE_FSYNC     3
 
+struct key_t {
+    u64 id;
+    u32 type;
+};
+
 struct val_t {
     u64 ts;
     u64 offset;
@@ -81,12 +86,12 @@ struct data_t {
     u64 size;
     u64 offset;
     u64 delta_us;
-    u64 pid;
+    u32 pid;
     char task[TASK_COMM_LEN];
     char file[DNAME_INLINE_LEN];
 };
 
-BPF_HASH(entryinfo, u64, struct val_t);
+BPF_HASH(entryinfo, struct key_t, struct val_t);
 BPF_PERF_OUTPUT(events);
 
 //
@@ -94,7 +99,7 @@ BPF_PERF_OUTPUT(events);
 //
 
 // xfs_file_read_iter(), xfs_file_write_iter():
-int trace_rw_entry(struct pt_regs *ctx, struct kiocb *iocb)
+static int trace_rw_entry(struct pt_regs *ctx, struct kiocb *iocb, int type)
 {
     u64 id = bpf_get_current_pid_tgid();
     u32 pid = id >> 32; // PID is higher part
@@ -102,15 +107,29 @@ int trace_rw_entry(struct pt_regs *ctx, struct kiocb *iocb)
     if (FILTER_PID)
         return 0;
 
+    struct key_t key = {};
+    key.id = id;
+    key.type = type;
+
     // store filep and timestamp by id
     struct val_t val = {};
     val.ts = bpf_ktime_get_ns();
     val.fp = iocb->ki_filp;
     val.offset = iocb->ki_pos;
     if (val.fp)
-        entryinfo.update(&id, &val);
+        entryinfo.update(&key, &val);
 
     return 0;
+}
+
+int trace_read_entry(struct pt_regs *ctx, struct kiocb *iocb)
+{
+    return trace_rw_entry(ctx, iocb, TRACE_READ);
+}
+
+int trace_write_entry(struct pt_regs *ctx, struct kiocb *iocb)
+{
+    return trace_rw_entry(ctx, iocb, TRACE_WRITE);
 }
 
 // xfs_file_open():
@@ -123,13 +142,17 @@ int trace_open_entry(struct pt_regs *ctx, struct inode *inode,
     if (FILTER_PID)
         return 0;
 
+    struct key_t key = {};
+    key.id = id;
+    key.type = TRACE_OPEN;
+
     // store filep and timestamp by id
     struct val_t val = {};
     val.ts = bpf_ktime_get_ns();
     val.fp = file;
     val.offset = 0;
     if (val.fp)
-        entryinfo.update(&id, &val);
+        entryinfo.update(&key, &val);
 
     return 0;
 }
@@ -143,13 +166,17 @@ int trace_fsync_entry(struct pt_regs *ctx, struct file *file)
     if (FILTER_PID)
         return 0;
 
+    struct key_t key = {};
+    key.id = id;
+    key.type = TRACE_FSYNC;
+
     // store filep and timestamp by id
     struct val_t val = {};
     val.ts = bpf_ktime_get_ns();
     val.fp = file;
     val.offset = 0;
     if (val.fp)
-        entryinfo.update(&id, &val);
+        entryinfo.update(&key, &val);
 
     return 0;
 }
@@ -163,8 +190,11 @@ static int trace_return(struct pt_regs *ctx, int type)
     struct val_t *valp;
     u64 id = bpf_get_current_pid_tgid();
     u32 pid = id >> 32; // PID is higher part
+    struct key_t key = {};
+    key.id = id;
+    key.type = type;
 
-    valp = entryinfo.lookup(&id);
+    valp = entryinfo.lookup(&key);
     if (valp == 0) {
         // missed tracing issue or filtered
         return 0;
@@ -173,7 +203,7 @@ static int trace_return(struct pt_regs *ctx, int type)
     // calculate delta
     u64 ts = bpf_ktime_get_ns();
     u64 delta_us = ts - valp->ts;
-    entryinfo.delete(&id);
+    entryinfo.delete(&key);
 
     // Skip entries with backwards time: temp workaround for #728
     if ((s64) delta_us < 0)
@@ -186,8 +216,11 @@ static int trace_return(struct pt_regs *ctx, int type)
 
     // populate output struct
     u32 size = PT_REGS_RC(ctx);
-    struct data_t data = {.type = type, .size = size, .delta_us = delta_us,
-        .pid = pid};
+    struct data_t data = {};
+    data.type = type;
+    data.size = size;
+    data.delta_us = delta_us;
+    data.pid = pid;
     data.ts_us = ts / 1000;
     data.offset = valp->offset;
     bpf_get_current_comm(&data.task, sizeof(data.task));
@@ -253,19 +286,19 @@ def print_event(cpu, data, size):
 
     if (csv):
         print("%d,%s,%d,%s,%d,%d,%d,%s" % (
-            event.ts_us, event.task, event.pid, type, event.size,
-            event.offset, event.delta_us, event.file))
+            event.ts_us, event.task.decode('utf-8'), event.pid, type, event.size,
+            event.offset, event.delta_us, event.file.decode('utf-8')))
         return
     print("%-8s %-14.14s %-6s %1s %-7s %-8d %7.2f %s" % (strftime("%H:%M:%S"),
-        event.task, event.pid, type, event.size, event.offset / 1024,
-        float(event.delta_us) / 1000, event.file))
+        event.task.decode('utf-8'), event.pid, type, event.size, event.offset / 1024,
+        float(event.delta_us) / 1000, event.file.decode('utf-8')))
 
 # initialize BPF
 b = BPF(text=bpf_text)
 
 # common file functions
-b.attach_kprobe(event="xfs_file_read_iter", fn_name="trace_rw_entry")
-b.attach_kprobe(event="xfs_file_write_iter", fn_name="trace_rw_entry")
+b.attach_kprobe(event="xfs_file_read_iter", fn_name="trace_read_entry")
+b.attach_kprobe(event="xfs_file_write_iter", fn_name="trace_write_entry")
 b.attach_kprobe(event="xfs_file_open", fn_name="trace_open_entry")
 b.attach_kprobe(event="xfs_file_fsync", fn_name="trace_fsync_entry")
 b.attach_kretprobe(event="xfs_file_read_iter", fn_name="trace_read_return")

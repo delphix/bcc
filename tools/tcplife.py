@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # @lint-avoid-python-3-compatibility-imports
 #
 # tcplife   Trace the lifespan of TCP sessions and summarize.
@@ -25,7 +25,7 @@
 from __future__ import print_function
 from bcc import BPF
 import argparse
-from socket import inet_ntop, ntohs, AF_INET, AF_INET6
+from socket import inet_ntop, AF_INET, AF_INET6
 from struct import pack
 from time import strftime
 
@@ -191,13 +191,13 @@ int kprobe__tcp_set_state(struct pt_regs *ctx, struct sock *sk, int state)
     FILTER_PID
 
     // get throughput stats. see tcp_get_info().
-    u64 rx_b = 0, tx_b = 0, sport = 0;
+    u64 rx_b = 0, tx_b = 0;
     struct tcp_sock *tp = (struct tcp_sock *)sk;
     rx_b = tp->bytes_received;
     tx_b = tp->bytes_acked;
 
     u16 family = sk->__sk_common.skc_family;
-    
+
     FILTER_FAMILY
 
     if (family == AF_INET) {
@@ -318,12 +318,12 @@ TRACEPOINT_PROBE(sock, inet_sock_set_state)
     if (mep != 0)
         pid = mep->pid;
     FILTER_PID
-    
+
     u16 family = args->family;
     FILTER_FAMILY
 
     // get throughput stats. see tcp_get_info().
-    u64 rx_b = 0, tx_b = 0, sport = 0;
+    u64 rx_b = 0, tx_b = 0;
     struct tcp_sock *tp = (struct tcp_sock *)sk;
     rx_b = tp->bytes_received;
     tx_b = tp->bytes_acked;
@@ -419,8 +419,8 @@ if debug or args.ebpf:
 header_string = "%-5s %-10.10s %s%-15s %-5s %-15s %-5s %5s %5s %s"
 format_string = "%-5d %-10.10s %s%-15s %-5d %-15s %-5d %5d %5d %.2f"
 if args.wide:
-    header_string = "%-5s %-16.16s %-2s %-26s %-5s %-26s %-5s %6s %6s %s"
-    format_string = "%-5d %-16.16s %-2s %-26s %-5s %-26s %-5d %6d %6d %.2f"
+    header_string = "%-5s %-16.16s %-2s %-39s %-5s %-39s %-5s %6s %6s %s"
+    format_string = "%-5d %-16.16s %-2s %-39s %-5s %-39s %-5d %6d %6d %.2f"
 if args.csv:
     header_string = "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s"
     format_string = "%d,%s,%s,%s,%s,%s,%d,%d,%d,%.2f"

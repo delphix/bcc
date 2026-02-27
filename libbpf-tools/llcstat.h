@@ -4,10 +4,16 @@
 
 #define TASK_COMM_LEN	16
 
-struct info {
+struct llcstat_value_info {
 	__u64 ref;
 	__u64 miss;
 	char comm[TASK_COMM_LEN];
+};
+
+struct llcstat_key_info {
+	__u32 cpu;
+	__u32 pid;
+	__u32 tid;
 };
 
 #endif /* __LLCSTAT_H */

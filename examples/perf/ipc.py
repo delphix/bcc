@@ -51,7 +51,7 @@ void trace_start(struct pt_regs *ctx) {
     u64 clk_start = clk.perf_read(cpu);
     u64 inst_start = inst.perf_read(cpu);
     u64 time_start = bpf_ktime_get_ns();
-    
+
     u64* kptr = NULL;
     kptr = data.lookup(&clk_k);
     if (kptr) {
@@ -93,7 +93,7 @@ void trace_end(struct pt_regs* ctx) {
     u64 clk_end = clk.perf_read(cpu);
     u64 inst_end = inst.perf_read(cpu);
     u64 time_end = bpf_ktime_get_ns();
-    
+
     struct perf_delta perf_data = {} ;
     u64* kptr = NULL;
     kptr = data.lookup(&clk_k);
@@ -104,7 +104,7 @@ void trace_end(struct pt_regs* ctx) {
     } else {
         return;
     }
-    
+
     kptr = data.lookup(&inst_k);
     if (kptr) {
         perf_data.inst_delta = inst_end - *kptr;
@@ -150,7 +150,7 @@ b.attach_uretprobe(name=options.lib_name, sym=options.sym, fn_name="trace_end")
 
 def print_data(cpu, data, size):
     e = b["output"].event(data)
-    print("%-8d %-12d %-8.2f %-8s %d" % (e.clk_delta, e.inst_delta, 
+    print("%-8d %-12d %-8.2f %-8s %d" % (e.clk_delta, e.inst_delta,
         1.0* e.inst_delta/e.clk_delta, str(round(e.time_delta * 1e-3, 2)) + ' us', cpu))
 
 print("Counters Data")
@@ -158,20 +158,22 @@ print("%-8s %-12s %-8s %-8s %s" % ('CLOCK', 'INSTRUCTION', 'IPC', 'TIME', 'CPU')
 
 b["output"].open_perf_buffer(print_data)
 
-# Perf Event for Unhalted Cycles, The hex value is
-# combination of event, umask and cmask. Read Intel
-# Doc to find the event and cmask. Or use 
-# perf list --details to get event, umask and cmask
+# Perf Events for Unhalted Cycles and Retired Instructions are supported on
+# most platforms with a PMU and the kernel will attempt to translate these
+# into an architecture-specific event code. For architectures that do not have
+# these mappings, see perf list --details to find event details.
 # NOTE: Events can be multiplexed by kernel in case the
 # number of counters is greater than supported by CPU
 # performance monitoring unit, which can result in inaccurate
 # results. Counter values need to be normalized for a more
 # accurate value.
-PERF_TYPE_RAW = 4
+PERF_TYPE_HARDWARE = 0
+PERF_COUNT_HW_CPU_CYCLES = 0
+PERF_COUNT_HW_INSTRUCTIONS = 1
 # Unhalted Clock Cycles
-b["clk"].open_perf_event(PERF_TYPE_RAW, 0x0000003C)
+b["clk"].open_perf_event(PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES)
 # Instruction Retired
-b["inst"].open_perf_event(PERF_TYPE_RAW, 0x000000C0)
+b["inst"].open_perf_event(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS)
 
 while True:
 	try:

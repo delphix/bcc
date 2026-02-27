@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 #
 # offwaketime   Summarize blocked time by kernel off-CPU stack + waker stack
 #               For Linux, uses BCC, eBPF.
@@ -9,6 +9,8 @@
 # Licensed under the Apache License, Version 2.0 (the "License")
 #
 # 20-Jan-2016   Brendan Gregg   Created this.
+# 04-Apr-2023   Rocky Xing      Updated default stack storage size.
+# 12-Nov-2025   Jack Zhao       Add raw tracepoint support
 
 from __future__ import print_function
 from bcc import BPF
@@ -100,10 +102,10 @@ parser.add_argument("-d", "--delimited", action="store_true",
     help="insert delimiter between kernel/user stacks")
 parser.add_argument("-f", "--folded", action="store_true",
     help="output folded format")
-parser.add_argument("--stack-storage-size", default=1024,
+parser.add_argument("--stack-storage-size", default=16384,
     type=positive_nonzero_int,
     help="the number of unique stack traces that can be stored and "
-         "displayed (default 1024)")
+         "displayed (default 16384)")
 parser.add_argument("duration", nargs="?", default=99999999,
     type=positive_nonzero_int,
     help="duration of trace, in seconds")
@@ -167,7 +169,7 @@ BPF_HASH(wokeby, u32, struct wokeby_t);
 
 BPF_STACK_TRACE(stack_traces, STACK_STORAGE_SIZE);
 
-int waker(struct pt_regs *ctx, struct task_struct *p) {
+static int waker(ARG0, struct task_struct *p) {
     // PID and TGID of the target Process to be waken
     u32 pid = p->pid;
     u32 tgid = p->tgid;
@@ -188,7 +190,7 @@ int waker(struct pt_regs *ctx, struct task_struct *p) {
     return 0;
 }
 
-int oncpu(struct pt_regs *ctx, struct task_struct *p) {
+static int oncpu(ARG0, struct task_struct *p, struct task_struct *n) {
     // PID and TGID of the previous Process (Process going into waiting)
     u32 pid = p->pid;
     u32 tgid = p->tgid;
@@ -203,8 +205,8 @@ int oncpu(struct pt_regs *ctx, struct task_struct *p) {
     // Calculate current Process's wait time by finding the timestamp of when
     // it went into waiting.
     // pid and tgid are now the PID and TGID of the current (waking) Process.
-    pid = bpf_get_current_pid_tgid();
-    tgid = bpf_get_current_pid_tgid() >> 32;
+    pid = n->pid;
+    tgid = n->tgid;
     tsp = start.lookup(&pid);
     if (tsp == 0) {
         // Missed or filtered when the Process went into waiting
@@ -241,6 +243,52 @@ int oncpu(struct pt_regs *ctx, struct task_struct *p) {
     return 0;
 }
 """
+bpf_text_kprobe = """
+int oncpu_kprobe(struct pt_regs *ctx, struct task_struct *prev) {
+    // In finish_task_switch, prev is the first parameter
+    // The current task (next) is obtained via bpf_get_current_task()
+    struct task_struct *next = (struct task_struct *)bpf_get_current_task();
+    return oncpu(ctx, prev, next);
+}
+
+int waker_kprobe(struct pt_regs *ctx, struct task_struct *p) {
+    // try_to_wake_up's first parameter is struct task_struct *p
+    // BCC automatically extracts this from pt_regs
+    return waker(ctx, p);
+}
+"""
+
+bpf_text_raw_tp = """
+RAW_TRACEPOINT_PROBE(sched_switch)
+{
+    // TP_PROTO(bool preempt, struct task_struct *prev, struct task_struct *next)
+    // ctx->args[0] = preempt
+    // ctx->args[1] = prev
+    // ctx->args[2] = next
+    struct task_struct *prev = (struct task_struct *)ctx->args[1];
+    struct task_struct *next = (struct task_struct *)ctx->args[2];
+
+    return oncpu(ctx, prev, next);
+}
+
+RAW_TRACEPOINT_PROBE(sched_wakeup)
+{
+    // TP_PROTO(struct task_struct *p)
+    struct task_struct *p = (struct task_struct *)ctx->args[0];
+    return waker(ctx, p);
+}
+"""
+is_supported_raw_tp = BPF.support_raw_tracepoint()
+if is_supported_raw_tp:
+    bpf_text += bpf_text_raw_tp
+else:
+    bpf_text += bpf_text_kprobe
+
+if is_supported_raw_tp:
+    arg0 = 'struct bpf_raw_tracepoint_args *ctx'
+else:
+    arg0 = 'struct pt_regs *ctx'
+bpf_text = bpf_text.replace('ARG0', arg0)
 
 # set thread filter
 if args.tgid is not None:
@@ -292,13 +340,14 @@ if args.ebpf:
 
 # initialize BPF
 b = BPF(text=bpf_text)
-b.attach_kprobe(event_re="^finish_task_switch$|^finish_task_switch\.isra\.\d$",
-                fn_name="oncpu")
-b.attach_kprobe(event="try_to_wake_up", fn_name="waker")
-matched = b.num_open_kprobes()
-if matched == 0:
-    print("0 functions traced. Exiting.")
-    exit()
+if not is_supported_raw_tp:
+    b.attach_kprobe(event_re=r'^finish_task_switch$|^finish_task_switch\.isra\.\d$',
+                    fn_name="oncpu_kprobe")
+    b.attach_kprobe(event="try_to_wake_up", fn_name="waker_kprobe")
+    matched = b.num_open_kprobes()
+    if matched == 0:
+        print("0 functions traced. Exiting.")
+        exit(1)
 
 # header
 if not folded:
@@ -388,7 +437,7 @@ for k, v in sorted(counts.items(), key=lambda counts: counts[1].value):
                 print("    [Missed User Stack] %d" % k.w_u_stack_id)
             else:
                 for addr in waker_user_stack:
-                    print("    %s" % b.sym(addr, k.w_tgid))
+                    print("    %s" % b.sym(addr, k.w_tgid).decode('utf-8', 'replace'))
         if not args.user_stacks_only:
             if need_delimiter and k.w_u_stack_id > 0 and k.w_k_stack_id > 0:
                 print("    -")
@@ -396,7 +445,7 @@ for k, v in sorted(counts.items(), key=lambda counts: counts[1].value):
                 print("    [Missed Kernel Stack]")
             else:
                 for addr in waker_kernel_stack:
-                    print("    %s" % b.ksym(addr))
+                    print("    %s" % b.ksym(addr).decode('utf-8', 'replace'))
 
         # print waker/wakee delimiter
         print("    %-16s %s" % ("--", "--"))
@@ -406,7 +455,7 @@ for k, v in sorted(counts.items(), key=lambda counts: counts[1].value):
                 print("    [Missed Kernel Stack]")
             else:
                 for addr in target_kernel_stack:
-                    print("    %s" % b.ksym(addr))
+                    print("    %s" % b.ksym(addr).decode('utf-8', 'replace'))
         if not args.kernel_stacks_only:
             if need_delimiter and k.t_u_stack_id > 0 and k.t_k_stack_id > 0:
                 print("    -")
@@ -414,7 +463,7 @@ for k, v in sorted(counts.items(), key=lambda counts: counts[1].value):
                 print("    [Missed User Stack]")
             else:
                 for addr in target_user_stack:
-                    print("    %s" % b.sym(addr, k.t_tgid))
+                    print("    %s" % b.sym(addr, k.t_tgid).decode('utf-8', 'replace'))
         print("    %-16s %s %s" % ("target:", k.target.decode('utf-8', 'replace'), k.t_pid))
         print("        %d\n" % v.value)
 

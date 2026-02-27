@@ -12,6 +12,7 @@
 #include <bpf/bpf.h>
 #include "biopattern.h"
 #include "biopattern.skel.h"
+#include "btf_helpers.h"
 #include "trace_helpers.h"
 
 static struct env {
@@ -42,10 +43,10 @@ const char argp_program_doc[] =
 "    biopattern -d sdc       # trace sdc only\n";
 
 static const struct argp_option opts[] = {
-	{ "timestamp", 'T', NULL, 0, "Include timestamp on output" },
-	{ "disk",  'd', "DISK",  0, "Trace this disk only" },
-	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
-	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
+	{ "timestamp", 'T', NULL, 0, "Include timestamp on output", 0 },
+	{ "disk",  'd', "DISK",  0, "Trace this disk only", 0 },
+	{ "verbose", 'v', NULL, 0, "Verbose debug output", 0 },
+	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help", 0 },
 	{},
 };
 
@@ -97,8 +98,7 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	return 0;
 }
 
-int libbpf_print_fn(enum libbpf_print_level level,
-		    const char *format, va_list args)
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
@@ -116,9 +116,7 @@ static int print_map(struct bpf_map *counters, struct partitions *partitions)
 	int err, fd = bpf_map__fd(counters);
 	const struct partition *partition;
 	struct counter counter;
-	struct tm *tm;
 	char ts[32];
-	time_t t;
 
 	while (!bpf_map_get_next_key(fd, &lookup_key, &next_key)) {
 		err = bpf_map_lookup_elem(fd, &next_key, &counter);
@@ -131,9 +129,7 @@ static int print_map(struct bpf_map *counters, struct partitions *partitions)
 		if (!total)
 			continue;
 		if (env.timestamp) {
-			time(&t);
-			tm = localtime(&t);
-			strftime(ts, sizeof(ts), "%H:%M:%S", tm);
+			str_timestamp("%H:%M:%S", ts, sizeof(ts));
 			printf("%-9s ", ts);
 		}
 		partition = partitions__get_by_dev(partitions, next_key);
@@ -159,6 +155,7 @@ static int print_map(struct bpf_map *counters, struct partitions *partitions)
 
 int main(int argc, char **argv)
 {
+	LIBBPF_OPTS(bpf_object_open_opts, open_opts);
 	struct partitions *partitions = NULL;
 	const struct partition *partition;
 	static const struct argp argp = {
@@ -175,13 +172,13 @@ int main(int argc, char **argv)
 
 	libbpf_set_print(libbpf_print_fn);
 
-	err = bump_memlock_rlimit();
+	err = ensure_core_btf(&open_opts);
 	if (err) {
-		fprintf(stderr, "failed to increase rlimit: %d\n", err);
+		fprintf(stderr, "failed to fetch necessary BTF for CO-RE: %s\n", strerror(-err));
 		return 1;
 	}
 
-	obj = biopattern_bpf__open();
+	obj = biopattern_bpf__open_opts(&open_opts);
 	if (!obj) {
 		fprintf(stderr, "failed to open BPF object\n");
 		return 1;
@@ -200,6 +197,7 @@ int main(int argc, char **argv)
 			fprintf(stderr, "invaild partition name: not exist\n");
 			goto cleanup;
 		}
+		obj->rodata->filter_dev = true;
 		obj->rodata->targ_dev = partition->dev;
 	}
 
@@ -239,6 +237,7 @@ int main(int argc, char **argv)
 cleanup:
 	biopattern_bpf__destroy(obj);
 	partitions__free(partitions);
+	cleanup_core_btf(&open_opts);
 
 	return err != 0;
 }

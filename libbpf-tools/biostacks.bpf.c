@@ -7,11 +7,13 @@
 #include "biostacks.h"
 #include "bits.bpf.h"
 #include "maps.bpf.h"
+#include "core_fixes.bpf.h"
 
 #define MAX_ENTRIES	10240
 
 const volatile bool targ_ms = false;
-const volatile dev_t targ_dev = -1;
+const volatile bool filter_dev = false;
+const volatile __u32 targ_dev = -1;
 
 struct internal_rqinfo {
 	u64 start_ts;
@@ -23,7 +25,6 @@ struct {
 	__uint(max_entries, MAX_ENTRIES);
 	__type(key, struct request *);
 	__type(value, struct internal_rqinfo);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
 } rqinfos SEC(".maps");
 
 struct {
@@ -31,7 +32,6 @@ struct {
 	__uint(max_entries, MAX_ENTRIES);
 	__type(key, struct rqinfo);
 	__type(value, struct hist);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
 } hists SEC(".maps");
 
 static struct hist zero;
@@ -40,12 +40,12 @@ static __always_inline
 int trace_start(void *ctx, struct request *rq, bool merge_bio)
 {
 	struct internal_rqinfo *i_rqinfop = NULL, i_rqinfo = {};
-	struct gendisk *disk = BPF_CORE_READ(rq, rq_disk);
-	dev_t dev;
+	struct gendisk *disk = get_disk(rq);
+	u32 dev;
 
 	dev = disk ? MKDEV(BPF_CORE_READ(disk, major),
 			BPF_CORE_READ(disk, first_minor)) : 0;
-	if (targ_dev != -1 && targ_dev != dev)
+	if (filter_dev && targ_dev != dev)
 		return 0;
 
 	if (merge_bio)
@@ -67,20 +67,8 @@ int trace_start(void *ctx, struct request *rq, bool merge_bio)
 	return 0;
 }
 
-SEC("fentry/blk_account_io_start")
-int BPF_PROG(blk_account_io_start, struct request *rq)
-{
-	return trace_start(ctx, rq, false);
-}
-
-SEC("kprobe/blk_account_io_merge_bio")
-int BPF_KPROBE(blk_account_io_merge_bio, struct request *rq)
-{
-	return trace_start(ctx, rq, true);
-}
-
-SEC("fentry/blk_account_io_done")
-int BPF_PROG(blk_account_io_done, struct request *rq)
+static __always_inline
+int trace_done(void *ctx, struct request *rq)
 {
 	u64 slot, ts = bpf_ktime_get_ns();
 	struct internal_rqinfo *i_rqinfop;
@@ -108,6 +96,36 @@ int BPF_PROG(blk_account_io_done, struct request *rq)
 cleanup:
 	bpf_map_delete_elem(&rqinfos, &rq);
 	return 0;
+}
+
+SEC("kprobe/blk_account_io_merge_bio")
+int BPF_KPROBE(blk_account_io_merge_bio, struct request *rq)
+{
+	return trace_start(ctx, rq, true);
+}
+
+SEC("fentry/blk_account_io_start")
+int BPF_PROG(blk_account_io_start, struct request *rq)
+{
+	return trace_start(ctx, rq, false);
+}
+
+SEC("fentry/blk_account_io_done")
+int BPF_PROG(blk_account_io_done, struct request *rq)
+{
+	return trace_done(ctx, rq);
+}
+
+SEC("tp_btf/block_io_start")
+int BPF_PROG(block_io_start, struct request *rq)
+{
+	return trace_start(ctx, rq, false);
+}
+
+SEC("tp_btf/block_io_done")
+int BPF_PROG(block_io_done, struct request *rq)
+{
+	return trace_done(ctx, rq);
 }
 
 char LICENSE[] SEC("license") = "GPL";
