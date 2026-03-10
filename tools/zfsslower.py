@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # @lint-avoid-python-3-compatibility-imports
 #
 # zfsslower  Trace slow ZFS operations.
@@ -81,10 +81,10 @@ struct data_t {
     // XXX: switch some to u32's when supported
     u64 ts_us;
     u64 type;
-    u64 size;
+    u32 size;
     u64 offset;
     u64 delta_us;
-    u64 pid;
+    u32 pid;
     char task[TASK_COMM_LEN];
     char file[DNAME_INLINE_LEN];
 };
@@ -182,9 +182,11 @@ static int trace_return(struct pt_regs *ctx, int type)
         return 0;
 
     // populate output struct
-    u32 size = PT_REGS_RC(ctx);
-    struct data_t data = {.type = type, .size = size, .delta_us = delta_us,
-        .pid = pid};
+    struct data_t data = {};
+    data.type = type;
+    data.size = PT_REGS_RC(ctx);
+    data.delta_us = delta_us;
+    data.pid = pid;
     data.ts_us = ts / 1000;
     data.offset = valp->offset;
     bpf_get_current_comm(&data.task, sizeof(data.task));
@@ -262,10 +264,10 @@ def print_event(cpu, data, size):
 b = BPF(text=bpf_text)
 
 # common file functions
-if BPF.get_kprobe_functions(b'zpl_iter'):
+if BPF.get_kprobe_functions(b'zpl_iter.*'):
     b.attach_kprobe(event="zpl_iter_read", fn_name="trace_rw_entry")
     b.attach_kprobe(event="zpl_iter_write", fn_name="trace_rw_entry")
-elif BPF.get_kprobe_functions(b'zpl_aio'):
+elif BPF.get_kprobe_functions(b'zpl_aio.*'):
     b.attach_kprobe(event="zpl_aio_read", fn_name="trace_rw_entry")
     b.attach_kprobe(event="zpl_aio_write", fn_name="trace_rw_entry")
 else:
@@ -273,10 +275,10 @@ else:
     b.attach_kprobe(event="zpl_write", fn_name="trace_rw_entry")
 b.attach_kprobe(event="zpl_open", fn_name="trace_open_entry")
 b.attach_kprobe(event="zpl_fsync", fn_name="trace_fsync_entry")
-if BPF.get_kprobe_functions(b'zpl_iter'):
+if BPF.get_kprobe_functions(b'zpl_iter.*'):
     b.attach_kretprobe(event="zpl_iter_read", fn_name="trace_read_return")
     b.attach_kretprobe(event="zpl_iter_write", fn_name="trace_write_return")
-elif BPF.get_kprobe_functions(b'zpl_aio'):
+elif BPF.get_kprobe_functions(b'zpl_aio.*'):
     b.attach_kretprobe(event="zpl_aio_read", fn_name="trace_read_return")
     b.attach_kretprobe(event="zpl_aio_write", fn_name="trace_write_return")
 else:

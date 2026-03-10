@@ -1,11 +1,12 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # @lint-avoid-python-3-compatibility-imports
 #
 # execsnoop Trace new processes via exec() syscalls.
 #           For Linux, uses BCC, eBPF. Embedded C.
 #
-# USAGE: execsnoop [-h] [-T] [-t] [-x] [-q] [-n NAME] [-l LINE]
-#                  [--max-args MAX_ARGS]
+# USAGE: execsnoop [-h] [-T] [-t] [-x] [--cgroupmap CGROUPMAP]
+#                  [--mntnsmap MNTNSMAP] [-u USER] [-q] [-n NAME] [-l LINE]
+#                  [-U] [--max-args MAX_ARGS] [-P PPID]
 #
 # This currently will print up to a maximum of 19 arguments, plus the process
 # name, so 20 fields in total (MAXARG).
@@ -16,12 +17,12 @@
 # Licensed under the Apache License, Version 2.0 (the "License")
 #
 # 07-Feb-2016   Brendan Gregg   Created this.
+# 11-Aug-2022   Rocky Xing      Added PPID filter support.
 
 from __future__ import print_function
 from bcc import BPF
 from bcc.containers import filter_by_containers
 from bcc.utils import ArgString, printb
-import bcc.utils as utils
 import argparse
 import re
 import time
@@ -48,16 +49,19 @@ def parse_uid(user):
 
 # arguments
 examples = """examples:
-    ./execsnoop           # trace all exec() syscalls
-    ./execsnoop -x        # include failed exec()s
-    ./execsnoop -T        # include time (HH:MM:SS)
-    ./execsnoop -U        # include UID
-    ./execsnoop -u 1000   # only trace UID 1000
-    ./execsnoop -u user   # get user UID and trace only them
-    ./execsnoop -t        # include timestamps
-    ./execsnoop -q        # add "quotemarks" around arguments
-    ./execsnoop -n main   # only print command lines containing "main"
-    ./execsnoop -l tpkg   # only print command where arguments contains "tpkg"
+    ./execsnoop                      # trace all exec() syscalls
+    ./execsnoop -x                   # include failed exec()s
+    ./execsnoop -T                   # include time (HH:MM:SS)
+    ./execsnoop -P 181               # only trace new processes whose parent PID is 181
+    ./execsnoop -U                   # include UID
+    ./execsnoop -C                   # include CPU
+    ./execsnoop -M                   # include PCOMM
+    ./execsnoop -u 1000              # only trace UID 1000
+    ./execsnoop -u user              # get user UID and trace only them
+    ./execsnoop -t                   # include timestamps
+    ./execsnoop -q                   # add "quotemarks" around arguments
+    ./execsnoop -n main              # only print command lines containing "main"
+    ./execsnoop -l tpkg              # only print command where arguments contains "tpkg"
     ./execsnoop --cgroupmap mappath  # only trace cgroups in this BPF map
     ./execsnoop --mntnsmap mappath   # only trace mount namespaces in the map
 """
@@ -88,11 +92,28 @@ parser.add_argument("-l", "--line",
     help="only print commands where arg contains this line (regex)")
 parser.add_argument("-U", "--print-uid", action="store_true",
     help="print UID column")
+parser.add_argument("-C", "--print-cpu", action="store_true",
+    help="print CPU column")
+parser.add_argument("-M", "--print-pcomm", action="store_true",
+    help="print parent command")
 parser.add_argument("--max-args", default="20",
     help="maximum number of arguments parsed and displayed, defaults to 20")
+parser.add_argument("-P", "--ppid",
+    help="trace this parent PID only")
 parser.add_argument("--ebpf", action="store_true",
     help=argparse.SUPPRESS)
 args = parser.parse_args()
+
+def check_cpu_filed():
+    # Define the bpf program for checking purpose
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,16,0)
+    filed_in_task_struct = True
+#else
+    filed_in_task_struct = False
+#endif
+
+    return filed_in_task_struct
+
 
 # define BPF program
 bpf_text = """
@@ -111,7 +132,9 @@ struct data_t {
     u32 pid;  // PID as in the userspace term (i.e. task->tgid in kernel)
     u32 ppid; // Parent PID as in the userspace term (i.e task->real_parent->tgid in kernel)
     u32 uid;
+    u32 cpu;
     char comm[TASK_COMM_LEN];
+    char pcomm[TASK_COMM_LEN];
     enum event_type type;
     char argv[ARGSIZE];
     int retval;
@@ -161,6 +184,9 @@ int syscall__execve(struct pt_regs *ctx,
     // as the real_parent->tgid.
     // We use the get_ppid function as a fallback in those cases. (#1883)
     data.ppid = task->real_parent->tgid;
+    bpf_probe_read_kernel_str(&data.pcomm, sizeof(data.pcomm), task->real_parent->comm);
+
+    PPID_FILTER
 
     bpf_get_current_comm(&data.comm, sizeof(data.comm));
     data.type = EVENT_ARG;
@@ -201,6 +227,10 @@ int do_ret_sys_execve(struct pt_regs *ctx)
     // as the real_parent->tgid.
     // We use the get_ppid function as a fallback in those cases. (#1883)
     data.ppid = task->real_parent->tgid;
+    bpf_probe_read_kernel_str(&data.pcomm, sizeof(data.pcomm), task->real_parent->comm);
+    data.cpu = CPU_RUNNING_ON;
+
+    PPID_FILTER
 
     bpf_get_current_comm(&data.comm, sizeof(data.comm));
     data.type = EVENT_RET;
@@ -218,6 +248,21 @@ if args.uid:
         'if (uid != %s) { return 0; }' % args.uid)
 else:
     bpf_text = bpf_text.replace('UID_FILTER', '')
+
+if args.ppid:
+    bpf_text = bpf_text.replace('PPID_FILTER',
+        'if (data.ppid != %s) { return 0; }' % args.ppid)
+else:
+    bpf_text = bpf_text.replace('PPID_FILTER', '')
+
+# CPU field moved back into thread_info since commit bcf9033e5449(linux 5.16)
+# Use BTF for CPU field checks if available, otherwise use LINUX_VERSION_CODE checking.
+if BPF.kernel_struct_has_field(b'task_struct', b'cpu') == 1 \
+        or check_cpu_filed():
+    bpf_text = bpf_text.replace('CPU_RUNNING_ON', 'task->cpu')
+else:
+    bpf_text = bpf_text.replace('CPU_RUNNING_ON', 'task->thread_info.cpu')
+
 bpf_text = filter_by_containers(args) + bpf_text
 if args.ebpf:
     print(bpf_text)
@@ -236,7 +281,13 @@ if args.timestamp:
     print("%-8s" % ("TIME(s)"), end="")
 if args.print_uid:
     print("%-6s" % ("UID"), end="")
-print("%-16s %-6s %-6s %3s %s" % ("PCOMM", "PID", "PPID", "RET", "ARGS"))
+print("%-16s %-7s " % ("COMM", "PID"), end="")
+if args.print_pcomm:
+    print("%-16s " % ("PCOMM"), end="")
+print("%-7s " % ("PPID"), end="")
+if args.print_cpu:
+    print("%-4s " % ("CPU"), end="")
+print("%3s %s" % ("RET", "ARGS"))
 
 class EventType(object):
     EVENT_ARG = 0
@@ -290,8 +341,13 @@ def print_event(cpu, data, size):
             ppid = event.ppid if event.ppid > 0 else get_ppid(event.pid)
             ppid = b"%d" % ppid if ppid > 0 else b"?"
             argv_text = b' '.join(argv[event.pid]).replace(b'\n', b'\\n')
-            printb(b"%-16s %-6d %-6s %3d %s" % (event.comm, event.pid,
-                   ppid, event.retval, argv_text))
+            printb(b"%-16s %-7d " % (event.comm, event.pid), nl="")
+            if args.print_pcomm:
+                printb(b"%-16s " % (event.pcomm), nl="")
+            printb(b"%-7s " % (ppid), nl="")
+            if args.print_cpu:
+                printb(b"%-4d " % (event.cpu), nl="")
+            printb(b"%3d %s" % (event.retval, argv_text))
         try:
             del(argv[event.pid])
         except Exception:

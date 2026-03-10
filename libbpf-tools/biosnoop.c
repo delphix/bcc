@@ -6,11 +6,13 @@
 #include <argp.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <time.h>
 #include <bpf/libbpf.h>
 #include <sys/resource.h>
 #include <bpf/bpf.h>
+#include <fcntl.h>
 #include "blk_types.h"
 #include "biosnoop.h"
 #include "biosnoop.skel.h"
@@ -22,11 +24,14 @@
 static volatile sig_atomic_t exiting = 0;
 
 static struct env {
+	__u64 min_lat_ms;
 	char *disk;
 	int duration;
 	bool timestamp;
 	bool queued;
 	bool verbose;
+	char *cgroupspath;
+	bool cg;
 } env = {};
 
 static volatile __u64 start_ts;
@@ -37,19 +42,25 @@ const char *argp_program_bug_address =
 const char argp_program_doc[] =
 "Trace block I/O.\n"
 "\n"
-"USAGE: biosnoop [--help] [-d DISK] [-Q]\n"
+"USAGE: biosnoop [--help] [-d DISK] [-c CG] [-Q]\n"
 "\n"
 "EXAMPLES:\n"
 "    biosnoop              # trace all block I/O\n"
 "    biosnoop -Q           # include OS queued time in I/O time\n"
+"    biosnoop -t           # use timestamps instead\n"
 "    biosnoop 10           # trace for 10 seconds only\n"
-"    biosnoop -d sdc       # trace sdc only\n";
+"    biosnoop -d sdc       # trace sdc only\n"
+"    biosnoop -c CG        # Trace process under cgroupsPath CG\n"
+"    biosnoop -m 1         # trace for slower than 1ms\n";
 
 static const struct argp_option opts[] = {
-	{ "queued", 'Q', NULL, 0, "Include OS queued time in I/O time" },
-	{ "disk",  'd', "DISK",  0, "Trace this disk only" },
-	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
-	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
+	{ "queued", 'Q', NULL, 0, "Include OS queued time in I/O time", 0 },
+	{ "disk",  'd', "DISK",  0, "Trace this disk only", 0 },
+	{ "verbose", 'v', NULL, 0, "Verbose debug output", 0 },
+	{ "cgroup", 'c', "/sys/fs/cgroup/unified/CG", 0, "Trace process in cgroup path", 0 },
+	{ "min", 'm', "MIN", 0, "Min latency to trace, in ms", 0 },
+	{ "timestamp", 't', NULL, 0, "Include timestamp on output", 0 },
+	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help", 0 },
 	{},
 };
 
@@ -67,12 +78,27 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	case 'Q':
 		env.queued = true;
 		break;
+	case 'c':
+		env.cg = true;
+		env.cgroupspath = arg;
+		break;
 	case 'd':
 		env.disk = arg;
 		if (strlen(arg) + 1 > DISK_NAME_LEN) {
 			fprintf(stderr, "invaild disk name: too long\n");
 			argp_usage(state);
 		}
+		break;
+	case 'm':
+		errno = 0;
+		env.min_lat_ms = strtoll(arg, NULL, 10);
+		if (errno) {
+			fprintf(stderr, "invalid latency (in us): %s\n", arg);
+			argp_usage(state);
+		}
+		break;
+	case 't':
+		env.timestamp = true;
 		break;
 	case ARGP_KEY_ARG:
 		if (pos_args++) {
@@ -93,8 +119,7 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	return 0;
 }
 
-int libbpf_print_fn(enum libbpf_print_level level,
-		const char *format, va_list args)
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
@@ -152,26 +177,54 @@ static struct partitions *partitions;
 void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
 {
 	const struct partition *partition;
-	const struct event *e = data;
+	struct event e;
 	char rwbs[RWBS_LEN];
+	struct timespec ct;
+	char ts[32];
 
-	if (!start_ts)
-		start_ts = e->ts;
-	blk_fill_rwbs(rwbs, e->cmd_flags);
-	partition = partitions__get_by_dev(partitions, e->dev);
-	printf("%-11.6f %-14.14s %-6d %-7s %-4s %-10lld %-7d ",
-		(e->ts - start_ts) / 1000000000.0,
-		e->comm, e->pid, partition ? partition->name : "Unknown", rwbs,
-		e->sector, e->len);
+        if (data_sz < sizeof(e)) {
+		printf("Error: packet too small\n");
+		return;
+	}
+	/* Copy data as alignment in the perf buffer isn't guaranteed. */
+	memcpy(&e, data, sizeof(e));
+
+	if (env.timestamp) {
+		/* Since `bpf_ktime_get_boot_ns` requires at least 5.8 kernel,
+		 * so get time from usespace instead */
+		clock_gettime(CLOCK_REALTIME, &ct);
+		str_timestamp("%H:%M:%S", ts, sizeof(ts));
+		printf("%-8s.%03ld ", ts, ct.tv_nsec / 1000000);
+	} else {
+		if (!start_ts) {
+			start_ts = e.ts;
+		}
+		printf("%-11.6f ",(e.ts - start_ts) / 1000000000.0);
+	}
+	blk_fill_rwbs(rwbs, e.cmd_flags);
+	partition = partitions__get_by_dev(partitions, e.dev);
+	printf("%-14.14s %-7d %-7s %-4s %-10lld %-7d ",
+		e.comm, e.pid, partition ? partition->name : "Unknown", rwbs,
+		e.sector, e.len);
 	if (env.queued)
-		printf("%7.3f ", e->qdelta != -1 ?
-			e->qdelta / 1000000.0 : -1);
-	printf("%7.3f\n", e->delta / 1000000.0);
+		printf("%7.3f ", e.qdelta != -1 ?
+			e.qdelta / 1000000.0 : -1);
+	printf("%7.3f\n", e.delta / 1000000.0);
 }
 
 void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
 {
 	fprintf(stderr, "lost %llu events on CPU #%d\n", lost_cnt, cpu);
+}
+
+static void blk_account_io_set_attach_target(struct biosnoop_bpf *obj)
+{
+	if (fentry_can_attach("blk_account_io_start", NULL))
+		bpf_program__set_attach_target(obj->progs.blk_account_io_start,
+					       0, "blk_account_io_start");
+	else
+		bpf_program__set_attach_target(obj->progs.blk_account_io_start,
+					       0, "__blk_account_io_start");
 }
 
 int main(int argc, char **argv)
@@ -182,24 +235,19 @@ int main(int argc, char **argv)
 		.parser = parse_arg,
 		.doc = argp_program_doc,
 	};
-	struct perf_buffer_opts pb_opts;
 	struct perf_buffer *pb = NULL;
 	struct ksyms *ksyms = NULL;
 	struct biosnoop_bpf *obj;
 	__u64 time_end = 0;
 	int err;
+	int idx, cg_map_fd;
+	int cgfd = -1;
 
 	err = argp_parse(&argp, argc, argv, 0, NULL, NULL);
 	if (err)
 		return err;
 
 	libbpf_set_print(libbpf_print_fn);
-
-	err = bump_memlock_rlimit();
-	if (err) {
-		fprintf(stderr, "failed to increase rlimit: %d\n", err);
-		return 1;
-	}
 
 	obj = biosnoop_bpf__open();
 	if (!obj) {
@@ -220,8 +268,30 @@ int main(int argc, char **argv)
 			fprintf(stderr, "invaild partition name: not exist\n");
 			goto cleanup;
 		}
+		obj->rodata->filter_dev = true;
+		obj->rodata->targ_dev = partition->dev;
 	}
 	obj->rodata->targ_queued = env.queued;
+	obj->rodata->filter_cg = env.cg;
+	obj->rodata->min_ns = env.min_lat_ms * 1000000;
+
+	if (tracepoint_exists("block", "block_io_start"))
+		bpf_program__set_autoload(obj->progs.blk_account_io_start, false);
+	else {
+		bpf_program__set_autoload(obj->progs.block_io_start, false);
+		blk_account_io_set_attach_target(obj);
+	}
+
+	ksyms = ksyms__load();
+	if (!ksyms) {
+		fprintf(stderr, "failed to load kallsyms\n");
+		goto cleanup;
+	}
+	if (!ksyms__get_symbol(ksyms, "blk_account_io_merge_bio"))
+		bpf_program__set_autoload(obj->progs.blk_account_io_merge_bio, false);
+
+	if (!env.queued)
+		bpf_program__set_autoload(obj->progs.block_rq_insert, false);
 
 	err = biosnoop_bpf__load(obj);
 	if (err) {
@@ -229,70 +299,42 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
-	obj->links.blk_account_io_start =
-		bpf_program__attach(obj->progs.blk_account_io_start);
-	err = libbpf_get_error(obj->links.blk_account_io_start);
-	if (err) {
-		fprintf(stderr, "failed to attach blk_account_io_start: %s\n",
-			strerror(err));
-		goto cleanup;
-	}
-	ksyms = ksyms__load();
-	if (!ksyms) {
-		fprintf(stderr, "failed to load kallsyms\n");
-		goto cleanup;
-	}
-	if (ksyms__get_symbol(ksyms, "blk_account_io_merge_bio")) {
-		obj->links.blk_account_io_merge_bio =
-			bpf_program__attach(obj->progs.blk_account_io_merge_bio);
-		err = libbpf_get_error(obj->links.blk_account_io_merge_bio);
-		if (err) {
-			fprintf(stderr, "failed to attach "
-				"blk_account_io_merge_bio: %s\n",
-				strerror(err));
+	/* update cgroup path fd to map */
+	if (env.cg) {
+		idx = 0;
+		cg_map_fd = bpf_map__fd(obj->maps.cgroup_map);
+		cgfd = open(env.cgroupspath, O_RDONLY);
+		if (cgfd < 0) {
+			fprintf(stderr, "Failed opening Cgroup path: %s\n", env.cgroupspath);
+			goto cleanup;
+		}
+		if (bpf_map_update_elem(cg_map_fd, &idx, &cgfd, BPF_ANY)) {
+			fprintf(stderr, "Failed adding target cgroup to map\n");
 			goto cleanup;
 		}
 	}
-	if (env.queued) {
-		obj->links.block_rq_insert =
-			bpf_program__attach(obj->progs.block_rq_insert);
-		err = libbpf_get_error(obj->links.block_rq_insert);
-		if (err) {
-			fprintf(stderr, "failed to attach block_rq_insert: %s\n",
-				strerror(err));
-			goto cleanup;
-		}
-	}
-	obj->links.block_rq_issue =
-		bpf_program__attach(obj->progs.block_rq_issue);
-	err = libbpf_get_error(obj->links.block_rq_issue);
+
+	err = biosnoop_bpf__attach(obj);
 	if (err) {
-		fprintf(stderr, "failed to attach block_rq_issue: %s\n",
-			strerror(err));
-		goto cleanup;
-	}
-	obj->links.block_rq_complete =
-		bpf_program__attach(obj->progs.block_rq_complete);
-	err = libbpf_get_error(obj->links.block_rq_complete);
-	if (err) {
-		fprintf(stderr, "failed to attach block_rq_complete: %s\n",
-			strerror(err));
+		fprintf(stderr, "failed to attach BPF programs: %d\n", err);
 		goto cleanup;
 	}
 
-	pb_opts.sample_cb = handle_event;
-	pb_opts.lost_cb = handle_lost_events;
 	pb = perf_buffer__new(bpf_map__fd(obj->maps.events), PERF_BUFFER_PAGES,
-			&pb_opts);
-	err = libbpf_get_error(pb);
-	if (err) {
-		pb = NULL;
+			      handle_event, handle_lost_events, NULL, NULL);
+	if (!pb) {
+		err = -errno;
 		fprintf(stderr, "failed to open perf buffer: %d\n", err);
 		goto cleanup;
 	}
 
-	printf("%-11s %-14s %-6s %-7s %-4s %-10s %-7s ",
-		"TIME(s)", "COMM", "PID", "DISK", "T", "SECTOR", "BYTES");
+	if (env.timestamp) {
+		printf("%-12s ", "TIMESTAMP");
+	} else {
+		printf("%-11s ", "TIME(s)");
+	}
+	printf("%-14s %-7s %-7s %-4s %-10s %-7s ",
+		"COMM", "PID", "DISK", "T", "SECTOR", "BYTES");
 	if (env.queued)
 		printf("%7s ", "QUE(ms)");
 	printf("%7s\n", "LAT(ms)");
@@ -310,14 +352,14 @@ int main(int argc, char **argv)
 	/* main: poll */
 	while (!exiting) {
 		err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS);
-		if (err < 0 && errno != EINTR) {
-			fprintf(stderr, "error polling perf buffer: %s\n", strerror(errno));
+		if (err < 0 && err != -EINTR) {
+			fprintf(stderr, "error polling perf buffer: %s\n", strerror(-err));
 			goto cleanup;
 		}
-		if (env.duration && get_ktime_ns() > time_end)
-			goto cleanup;
 		/* reset err to return 0 if exiting */
 		err = 0;
+		if (env.duration && get_ktime_ns() > time_end)
+			break;
 	}
 
 cleanup:
@@ -325,6 +367,8 @@ cleanup:
 	biosnoop_bpf__destroy(obj);
 	ksyms__free(ksyms);
 	partitions__free(partitions);
+	if (cgfd > 0)
+		close(cgfd);
 
 	return err != 0;
 }

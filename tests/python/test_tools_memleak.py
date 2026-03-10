@@ -1,14 +1,17 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 from unittest import main, skipUnless, TestCase
 from utils import kernel_version_ge
 import os
+import platform
 import subprocess
 import sys
 import tempfile
 
-TOOLS_DIR = "../../tools/"
+TOOLS_DIR = "/bcc/tools/"
 
+if not os.path.exists("/bcc/tools/"):
+    TOOLS_DIR = "../../tools/"
 
 class cfg:
     cmd_format = ""
@@ -23,7 +26,7 @@ def setUpModule():
     # Build the memory leaking application.
     c_src = 'test_tools_memleak_leaker_app.c'
     tmp_dir = tempfile.mkdtemp(prefix='bcc-test-memleak-')
-    c_src_full = os.path.dirname(sys.argv[0]) + os.path.sep + c_src
+    c_src_full = os.path.abspath(os.path.dirname(sys.argv[0])) + os.path.sep + c_src
     exec_dst = tmp_dir + os.path.sep + 'leaker_app'
 
     if subprocess.call(['gcc', '-g', '-O0', '-o', exec_dst, c_src_full]) != 0:
@@ -102,7 +105,13 @@ class MemleakToolTests(TestCase):
         self.assertEqual(cfg.leaking_amount, self.run_leaker("memalign"))
 
     def test_pvalloc(self):
-        self.assertEqual(cfg.leaking_amount, self.run_leaker("pvalloc"))
+        # pvalloc's implementation for power invokes mmap(), which adjusts the
+        # allocated size to meet pvalloc's constraints. Actual leaked memory
+        # could be more than requested, hence assertLessEqual.
+        if platform.machine() == 'ppc64le':
+            self.assertLessEqual(cfg.leaking_amount, self.run_leaker("pvalloc"))
+        else:
+            self.assertEqual(cfg.leaking_amount, self.run_leaker("pvalloc"))
 
     def test_aligned_alloc(self):
         self.assertEqual(cfg.leaking_amount, self.run_leaker("aligned_alloc"))

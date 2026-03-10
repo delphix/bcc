@@ -24,8 +24,9 @@ import os
 import errno
 import re
 import sys
+import platform
 
-from .libbcc import lib, _RAW_CB_TYPE, _LOST_CB_TYPE, _RINGBUF_CB_TYPE
+from .libbcc import lib, _RAW_CB_TYPE, _LOST_CB_TYPE, _RINGBUF_CB_TYPE, bcc_perf_buffer_opts
 from .utils import get_online_cpus
 from .utils import get_possible_cpus
 
@@ -56,34 +57,40 @@ BPF_MAP_TYPE_SK_STORAGE = 24
 BPF_MAP_TYPE_DEVMAP_HASH = 25
 BPF_MAP_TYPE_STRUCT_OPS = 26
 BPF_MAP_TYPE_RINGBUF = 27
+BPF_MAP_TYPE_INODE_STORAGE = 28
+BPF_MAP_TYPE_TASK_STORAGE = 29
 
-map_type_name = {BPF_MAP_TYPE_HASH: "HASH",
-                 BPF_MAP_TYPE_ARRAY: "ARRAY",
-                 BPF_MAP_TYPE_PROG_ARRAY: "PROG_ARRAY",
-                 BPF_MAP_TYPE_PERF_EVENT_ARRAY: "PERF_EVENT_ARRAY",
-                 BPF_MAP_TYPE_PERCPU_HASH: "PERCPU_HASH",
-                 BPF_MAP_TYPE_PERCPU_ARRAY: "PERCPU_ARRAY",
-                 BPF_MAP_TYPE_STACK_TRACE: "STACK_TRACE",
-                 BPF_MAP_TYPE_CGROUP_ARRAY: "CGROUP_ARRAY",
-                 BPF_MAP_TYPE_LRU_HASH: "LRU_HASH",
-                 BPF_MAP_TYPE_LRU_PERCPU_HASH: "LRU_PERCPU_HASH",
-                 BPF_MAP_TYPE_LPM_TRIE: "LPM_TRIE",
-                 BPF_MAP_TYPE_ARRAY_OF_MAPS: "ARRAY_OF_MAPS",
-                 BPF_MAP_TYPE_HASH_OF_MAPS: "HASH_OF_MAPS",
-                 BPF_MAP_TYPE_DEVMAP: "DEVMAP",
-                 BPF_MAP_TYPE_SOCKMAP: "SOCKMAP",
-                 BPF_MAP_TYPE_CPUMAP: "CPUMAP",
-                 BPF_MAP_TYPE_XSKMAP: "XSKMAP",
-                 BPF_MAP_TYPE_SOCKHASH: "SOCKHASH",
-                 BPF_MAP_TYPE_CGROUP_STORAGE: "CGROUP_STORAGE",
-                 BPF_MAP_TYPE_REUSEPORT_SOCKARRAY: "REUSEPORT_SOCKARRAY",
-                 BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE: "PERCPU_CGROUP_STORAGE",
-                 BPF_MAP_TYPE_QUEUE: "QUEUE",
-                 BPF_MAP_TYPE_STACK: "STACK",
-                 BPF_MAP_TYPE_SK_STORAGE: "SK_STORAGE",
-                 BPF_MAP_TYPE_DEVMAP_HASH: "DEVMAP_HASH",
-                 BPF_MAP_TYPE_STRUCT_OPS: "STRUCT_OPS",
-                 BPF_MAP_TYPE_RINGBUF: "RINGBUF",}
+map_type_name = {
+    BPF_MAP_TYPE_HASH: "HASH",
+    BPF_MAP_TYPE_ARRAY: "ARRAY",
+    BPF_MAP_TYPE_PROG_ARRAY: "PROG_ARRAY",
+    BPF_MAP_TYPE_PERF_EVENT_ARRAY: "PERF_EVENT_ARRAY",
+    BPF_MAP_TYPE_PERCPU_HASH: "PERCPU_HASH",
+    BPF_MAP_TYPE_PERCPU_ARRAY: "PERCPU_ARRAY",
+    BPF_MAP_TYPE_STACK_TRACE: "STACK_TRACE",
+    BPF_MAP_TYPE_CGROUP_ARRAY: "CGROUP_ARRAY",
+    BPF_MAP_TYPE_LRU_HASH: "LRU_HASH",
+    BPF_MAP_TYPE_LRU_PERCPU_HASH: "LRU_PERCPU_HASH",
+    BPF_MAP_TYPE_LPM_TRIE: "LPM_TRIE",
+    BPF_MAP_TYPE_ARRAY_OF_MAPS: "ARRAY_OF_MAPS",
+    BPF_MAP_TYPE_HASH_OF_MAPS: "HASH_OF_MAPS",
+    BPF_MAP_TYPE_DEVMAP: "DEVMAP",
+    BPF_MAP_TYPE_SOCKMAP: "SOCKMAP",
+    BPF_MAP_TYPE_CPUMAP: "CPUMAP",
+    BPF_MAP_TYPE_XSKMAP: "XSKMAP",
+    BPF_MAP_TYPE_SOCKHASH: "SOCKHASH",
+    BPF_MAP_TYPE_CGROUP_STORAGE: "CGROUP_STORAGE",
+    BPF_MAP_TYPE_REUSEPORT_SOCKARRAY: "REUSEPORT_SOCKARRAY",
+    BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE: "PERCPU_CGROUP_STORAGE",
+    BPF_MAP_TYPE_QUEUE: "QUEUE",
+    BPF_MAP_TYPE_STACK: "STACK",
+    BPF_MAP_TYPE_SK_STORAGE: "SK_STORAGE",
+    BPF_MAP_TYPE_DEVMAP_HASH: "DEVMAP_HASH",
+    BPF_MAP_TYPE_STRUCT_OPS: "STRUCT_OPS",
+    BPF_MAP_TYPE_RINGBUF: "RINGBUF",
+    BPF_MAP_TYPE_INODE_STORAGE: "INODE_STORAGE",
+    BPF_MAP_TYPE_TASK_STORAGE: "TASK_STORAGE",
+}
 
 stars_max = 40
 log2_index_max = 65
@@ -102,7 +109,10 @@ def _stars(val, val_max, width):
         text = text[:-1] + "+"
     return text
 
-def _print_json_hist(vals, val_type, section_bucket=None):
+def get_json_hist(vals, val_type, section_bucket=None):
+    return _get_json_hist(vals, val_type, section_bucket=None)
+
+def _get_json_hist(vals, val_type, section_bucket=None):
     hist_list = []
     max_nonzero_idx = 0
     for i in range(len(vals)):
@@ -125,7 +135,7 @@ def _print_json_hist(vals, val_type, section_bucket=None):
     histogram = {"ts": strftime("%Y-%m-%d %H:%M:%S"), "val_type": val_type, "data": hist_list}
     if section_bucket:
         histogram[section_bucket[0]] = section_bucket[1]
-    print(histogram)
+    return histogram
 
 def _print_log2_hist(vals, val_type, strip_leading_zero):
     global stars_max
@@ -202,33 +212,35 @@ def get_table_type_name(ttype):
 
 
 def _get_event_class(event_map):
-    ct_mapping = { 'char'              : ct.c_char,
-                   's8'                : ct.c_char,
-                   'unsigned char'     : ct.c_ubyte,
-                   'u8'                : ct.c_ubyte,
-                   'u8 *'              : ct.c_char_p,
-                   'char *'            : ct.c_char_p,
-                   'short'             : ct.c_short,
-                   's16'               : ct.c_short,
-                   'unsigned short'    : ct.c_ushort,
-                   'u16'               : ct.c_ushort,
-                   'int'               : ct.c_int,
-                   's32'               : ct.c_int,
-                   'enum'              : ct.c_int,
-                   'unsigned int'      : ct.c_uint,
-                   'u32'               : ct.c_uint,
-                   'long'              : ct.c_long,
-                   'unsigned long'     : ct.c_ulong,
-                   'long long'         : ct.c_longlong,
-                   's64'               : ct.c_longlong,
-                   'unsigned long long': ct.c_ulonglong,
-                   'u64'               : ct.c_ulonglong,
-                   '__int128'          : (ct.c_longlong * 2),
-                   'unsigned __int128' : (ct.c_ulonglong * 2),
-                   'void *'            : ct.c_void_p }
+    ct_mapping = {
+        'char'              : ct.c_char,
+        's8'                : ct.c_char,
+        'unsigned char'     : ct.c_ubyte,
+        'u8'                : ct.c_ubyte,
+        'u8 *'              : ct.c_char_p,
+        'char *'            : ct.c_char_p,
+        'short'             : ct.c_short,
+        's16'               : ct.c_short,
+        'unsigned short'    : ct.c_ushort,
+        'u16'               : ct.c_ushort,
+        'int'               : ct.c_int,
+        's32'               : ct.c_int,
+        'enum'              : ct.c_int,
+        'unsigned int'      : ct.c_uint,
+        'u32'               : ct.c_uint,
+        'long'              : ct.c_long,
+        'unsigned long'     : ct.c_ulong,
+        'long long'         : ct.c_longlong,
+        's64'               : ct.c_longlong,
+        'unsigned long long': ct.c_ulonglong,
+        'u64'               : ct.c_ulonglong,
+        '__int128'          : (ct.c_longlong * 2),
+        'unsigned __int128' : (ct.c_ulonglong * 2),
+        'void *'            : ct.c_void_p,
+    }
 
-    # handle array types e.g. "int [16] foo"
-    array_type = re.compile(r"(.+) \[([0-9]+)\]$")
+    # handle array types e.g. "int [16]", "char[16]" or "unsigned char[16]"
+    array_type = re.compile(r"(\S+(?: \S+)*) ?\[([0-9]+)\]$")
 
     fields = []
     num_fields = lib.bpf_perf_event_fields(event_map.bpf.module, event_map._name)
@@ -601,7 +613,13 @@ class TableBase(MutableMapping):
                 break
 
         for i in range(0, total):
-            yield (ct_keys[i], ct_values[i])
+            k = ct_keys[i]
+            v = ct_values[i]
+            if not isinstance(k, ct.Structure):
+                k = self.Key(k)
+            if not isinstance(v, ct.Structure):
+                v = self.Leaf(v)
+            yield (k, v)
 
     def zero(self):
         # Even though this is not very efficient, we grab the entire list of
@@ -643,7 +661,7 @@ class TableBase(MutableMapping):
             raise StopIteration()
         return next_key
 
-    def decode_c_struct(self, tmp, buckets, bucket_fn, bucket_sort_fn):
+    def decode_c_struct(self, tmp, buckets, bucket_fn, bucket_sort_fn, index_max=log2_index_max):
         f1 = self.Key._fields_[0][0]
         f2 = self.Key._fields_[1][0]
         # The above code assumes that self.Key._fields_[1][0] holds the
@@ -657,7 +675,7 @@ class TableBase(MutableMapping):
             bucket = getattr(k, f1)
             if bucket_fn:
                 bucket = bucket_fn(bucket)
-            vals = tmp[bucket] = tmp.get(bucket, [0] * log2_index_max)
+            vals = tmp[bucket] = tmp.get(bucket, [0] * index_max)
             slot = getattr(k, f2)
             vals[slot] = v.value
         buckets_lst = list(tmp.keys())
@@ -694,13 +712,13 @@ class TableBase(MutableMapping):
                     section_bucket = (section_header, section_print_fn(bucket))
                 else:
                     section_bucket = (section_header, bucket)
-                _print_json_hist(vals, val_type, section_bucket)
+                print(_get_json_hist(vals, val_type, section_bucket))
 
         else:
             vals = [0] * log2_index_max
             for k, v in self.items():
                 vals[k.value] = v.value
-            _print_json_hist(vals, val_type)
+            print(_get_json_hist(vals, val_type))
 
     def print_log2_hist(self, val_type="value", section_header="Bucket ptr",
             section_print_fn=None, bucket_fn=None, strip_leading_zero=None,
@@ -767,7 +785,7 @@ class TableBase(MutableMapping):
         if isinstance(self.Key(), ct.Structure):
             tmp = {}
             buckets = []
-            self.decode_c_struct(tmp, buckets, bucket_fn, bucket_sort_fn)
+            self.decode_c_struct(tmp, buckets, bucket_fn, bucket_sort_fn, linear_index_max)
 
             for bucket in buckets:
                 vals = tmp[bucket]
@@ -952,7 +970,7 @@ class PerfEventArray(ArrayBase):
             self._event_class = _get_event_class(self)
         return ct.cast(data, ct.POINTER(self._event_class)).contents
 
-    def open_perf_buffer(self, callback, page_cnt=8, lost_cb=None):
+    def open_perf_buffer(self, callback, page_cnt=8, lost_cb=None, wakeup_events=1):
         """open_perf_buffers(callback)
 
         Opens a set of per-cpu ring buffer to receive custom perf event
@@ -966,9 +984,9 @@ class PerfEventArray(ArrayBase):
             raise Exception("Perf buffer page_cnt must be a power of two")
 
         for i in get_online_cpus():
-            self._open_perf_buffer(i, callback, page_cnt, lost_cb)
+            self._open_perf_buffer(i, callback, page_cnt, lost_cb, wakeup_events)
 
-    def _open_perf_buffer(self, cpu, callback, page_cnt, lost_cb):
+    def _open_perf_buffer(self, cpu, callback, page_cnt, lost_cb, wakeup_events):
         def raw_cb_(_, data, size):
             try:
                 callback(cpu, data, size)
@@ -987,7 +1005,11 @@ class PerfEventArray(ArrayBase):
                     raise e
         fn = _RAW_CB_TYPE(raw_cb_)
         lost_fn = _LOST_CB_TYPE(lost_cb_) if lost_cb else ct.cast(None, _LOST_CB_TYPE)
-        reader = lib.bpf_open_perf_buffer(fn, lost_fn, None, -1, cpu, page_cnt)
+        opts = bcc_perf_buffer_opts()
+        opts.pid = -1
+        opts.cpu = cpu
+        opts.wakeup_events = wakeup_events
+        reader = lib.bpf_open_perf_buffer_opts(fn, lost_fn, None, page_cnt, ct.byref(opts))
         if not reader:
             raise Exception("Could not open perf buffer")
         fd = lib.perf_reader_fd(reader)
@@ -998,14 +1020,14 @@ class PerfEventArray(ArrayBase):
         # The actual fd is held by the perf reader, add to track opened keys
         self._open_key_fds[cpu] = -1
 
-    def _open_perf_event(self, cpu, typ, config):
-        fd = lib.bpf_open_perf_event(typ, config, -1, cpu)
+    def _open_perf_event(self, cpu, typ, config, pid=-1):
+        fd = lib.bpf_open_perf_event(typ, config, pid, cpu)
         if fd < 0:
             raise Exception("bpf_open_perf_event failed")
         self[self.Key(cpu)] = self.Leaf(fd)
         self._open_key_fds[cpu] = fd
 
-    def open_perf_event(self, typ, config):
+    def open_perf_event(self, typ, config, pid=-1):
         """open_perf_event(typ, config)
 
         Configures the table such that calls from the bpf program to
@@ -1013,7 +1035,7 @@ class PerfEventArray(ArrayBase):
         counter denoted by event ev on the local cpu.
         """
         for i in get_online_cpus():
-            self._open_perf_event(i, typ, config)
+            self._open_perf_event(i, typ, config, pid)
 
 
 class PerCpuHash(HashTable):
@@ -1172,8 +1194,9 @@ class StackTrace(TableBase):
             else:
               addr = self.stack.ip[self.n]
 
-            if addr == 0 :
-                raise StopIteration()
+            # powerpc populates optional, potentially-null second and third entries
+            if addr == 0 and (not platform.machine().startswith('ppc') or (self.n != 1 and self.n != 2)) :
+                    raise StopIteration()
 
             return self.resolve(addr) if self.resolve else addr
 

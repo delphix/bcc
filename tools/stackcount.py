@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 #
 # stackcount    Count events and their stack traces.
 #               For Linux, uses BCC, eBPF.
@@ -267,7 +267,7 @@ class Tool(object):
         if self.args.kernel_stacks_only and self.args.user_stacks_only:
             print("ERROR: -K and -U are mutually exclusive. If you want " +
                 "both stacks, that is the default.")
-            exit()
+            exit(1)
         if not self.args.kernel_stacks_only and not self.args.user_stacks_only:
             self.kernel_stack = True
             self.user_stack = True
@@ -292,18 +292,18 @@ class Tool(object):
         if self.args.verbose:
             print("%-16x " % addr, end="")
         if self.args.offset:
-            print("%s" % self.probe.bpf.ksym(addr, show_offset=True))
+            print("%s" % self.probe.bpf.ksym(addr, show_offset=True).decode())
         else:
-            print("%s" % self.probe.bpf.ksym(addr))
+            print("%s" % self.probe.bpf.ksym(addr).decode())
 
     def _print_uframe(self, addr, pid):
         print("  ", end="")
         if self.args.verbose:
             print("%-16x " % addr, end="")
         if self.args.offset:
-            print("%s" % self.probe.bpf.sym(addr, pid, show_offset=True))
+            print("%s" % self.probe.bpf.sym(addr, pid, show_offset=True).decode())
         else:
-            print("%s" % self.probe.bpf.sym(addr, pid))
+            print("%s" % self.probe.bpf.sym(addr, pid).decode())
 
     @staticmethod
     def _signal_ignore(signal, frame):
@@ -319,6 +319,9 @@ class Tool(object):
             print("Tracing %d functions for \"%s\"... Hit Ctrl-C to end." %
                   (self.probe.matched, self.args.pattern))
         b = self.probe.bpf
+        # check whether hash table batch ops is supported
+        htab_batch_ops = True if BPF.kernel_struct_has_field(b'bpf_map_ops',
+                         b'map_lookup_and_delete_batch') == 1 else False
         exiting = 0 if self.args.interval else 1
         seconds = 0
         while True:
@@ -340,7 +343,8 @@ class Tool(object):
             counts = self.probe.bpf["counts"]
             stack_traces = self.probe.bpf["stack_traces"]
             self.comm_cache = {}
-            for k, v in sorted(counts.items(),
+            for k, v in sorted(counts.items_lookup_and_delete_batch()
+                               if htab_batch_ops else counts.items(),
                                key=lambda counts: counts[1].value):
                 user_stack = [] if k.user_stack_id < 0 else \
                     stack_traces.walk(k.user_stack_id)
@@ -368,7 +372,8 @@ class Tool(object):
                     if not self.args.pid and k.tgid != 0xffffffff:
                         self._print_comm(k.name, k.tgid)
                     print("    %d\n" % v.value)
-            counts.clear()
+            if not htab_batch_ops:
+                counts.clear()
 
             if exiting:
                 if not self.args.folded:

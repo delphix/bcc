@@ -9,6 +9,7 @@
  * Based on ext4dist(8) from BCC by Brendan Gregg.
  * 9-Feb-2021   Wenbo Zhang   Created this.
  * 20-May-2021   Hengqi Chen  Migrated to fsdist.
+ * 27-Oct-2023   Pcheng Cui   Add support for F2FS.
  */
 #include <argp.h>
 #include <libgen.h>
@@ -24,6 +25,7 @@
 
 #include "fsdist.h"
 #include "fsdist.skel.h"
+#include "btf_helpers.h"
 #include "trace_helpers.h"
 
 #define warn(...) fprintf(stderr, __VA_ARGS__)
@@ -32,50 +34,82 @@ enum fs_type {
 	NONE,
 	BTRFS,
 	EXT4,
+	FUSE,
 	NFS,
 	XFS,
+	F2FS,
+	BCACHEFS,
+	ZFS,
 };
 
 static struct fs_config {
 	const char *fs;
-	const char *op_funcs[MAX_OP];
+	const char *op_funcs[F_MAX_OP];
 } fs_configs[] = {
 	[BTRFS] = { "btrfs", {
-		[READ] = "btrfs_file_read_iter",
-		[WRITE] = "btrfs_file_write_iter",
-		[OPEN] = "btrfs_file_open",
-		[FSYNC] = "btrfs_sync_file",
-		[GETATTR] = NULL, /* not supported */
+		[F_READ] = "btrfs_file_read_iter",
+		[F_WRITE] = "btrfs_file_write_iter",
+		[F_OPEN] = "btrfs_file_open",
+		[F_FSYNC] = "btrfs_sync_file",
+		[F_GETATTR] = NULL, /* not supported */
 	}},
 	[EXT4] = { "ext4", {
-		[READ] = "ext4_file_read_iter",
-		[WRITE] = "ext4_file_write_iter",
-		[OPEN] = "ext4_file_open",
-		[FSYNC] = "ext4_sync_file",
-		[GETATTR] = "ext4_file_getattr",
+		[F_READ] = "ext4_file_read_iter",
+		[F_WRITE] = "ext4_file_write_iter",
+		[F_OPEN] = "ext4_file_open",
+		[F_FSYNC] = "ext4_sync_file",
+		[F_GETATTR] = "ext4_file_getattr",
+	}},
+	[FUSE] = { "fuse", {
+		[F_READ] = "fuse_file_read_iter",
+		[F_WRITE] = "fuse_file_write_iter",
+		[F_OPEN] = "fuse_open",
+		[F_FSYNC] = "fuse_fsync",
+		[F_GETATTR] = "fuse_getattr",
 	}},
 	[NFS] = { "nfs", {
-		[READ] = "nfs_file_read",
-		[WRITE] = "nfs_file_write",
-		[OPEN] = "nfs_file_open",
-		[FSYNC] = "nfs_file_fsync",
-		[GETATTR] = "nfs_getattr",
+		[F_READ] = "nfs_file_read",
+		[F_WRITE] = "nfs_file_write",
+		[F_OPEN] = "nfs_file_open",
+		[F_FSYNC] = "nfs_file_fsync",
+		[F_GETATTR] = "nfs_getattr",
 	}},
 	[XFS] = { "xfs", {
-		[READ] = "xfs_file_read_iter",
-		[WRITE] = "xfs_file_write_iter",
-		[OPEN] = "xfs_file_open",
-		[FSYNC] = "xfs_file_fsync",
-		[GETATTR] = NULL, /* not supported */
+		[F_READ] = "xfs_file_read_iter",
+		[F_WRITE] = "xfs_file_write_iter",
+		[F_OPEN] = "xfs_file_open",
+		[F_FSYNC] = "xfs_file_fsync",
+		[F_GETATTR] = NULL, /* not supported */
+	}},
+	[F2FS] = { "f2fs", {
+		[F_READ] = "f2fs_file_read_iter",
+		[F_WRITE] = "f2fs_file_write_iter",
+		[F_OPEN] = "f2fs_file_open",
+		[F_FSYNC] = "f2fs_sync_file",
+		[F_GETATTR] = "f2fs_getattr",
+	}},
+	[BCACHEFS] = { "bcachefs", {
+		[F_READ] = "bch2_read_iter",
+		[F_WRITE] = "bch2_write_iter",
+		[F_OPEN] = "bch2_open",
+		[F_FSYNC] = "bch2_fsync",
+		[F_GETATTR] = "bch2_getattr",
+	}},
+	[ZFS] = { "zfs", {
+		[F_READ] = "zpl_iter_read",
+		[F_WRITE] = "zpl_iter_write",
+		[F_OPEN] = "zpl_open",
+		[F_FSYNC] = "zpl_fsync",
+		[F_GETATTR] = NULL, /* not supported */
 	}},
 };
 
 static char *file_op_names[] = {
-	[READ] = "read",
-	[WRITE] = "write",
-	[OPEN] = "open",
-	[FSYNC] = "fsync",
-	[GETATTR] = "getattr",
+	[F_READ] = "read",
+	[F_WRITE] = "write",
+	[F_OPEN] = "open",
+	[F_FSYNC] = "fsync",
+	[F_GETATTR] = "getattr",
 };
 
 static struct hist zero;
@@ -105,12 +139,12 @@ const char argp_program_doc[] =
 "    fsdist -t btrfs -m 5       # trace btrfs operation, 5s summaries, in ms\n";
 
 static const struct argp_option opts[] = {
-	{ "timestamp", 'T', NULL, 0, "Print timestamp" },
-	{ "milliseconds", 'm', NULL, 0, "Millisecond histogram" },
-	{ "pid", 'p', "PID", 0, "Process ID to trace" },
-	{ "type", 't', "Filesystem", 0, "Which filesystem to trace, [btrfs/ext4/nfs/xfs]" },
-	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
-	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
+	{ "timestamp", 'T', NULL, 0, "Print timestamp", 0 },
+	{ "milliseconds", 'm', NULL, 0, "Millisecond histogram", 0 },
+	{ "pid", 'p', "PID", 0, "Process ID to trace", 0 },
+	{ "type", 't', "Filesystem", 0, "Which filesystem to trace, [btrfs/ext4/fuse/nfs/xfs/f2fs/bcachefs/zfs]", 0 },
+	{ "verbose", 'v', NULL, 0, "Verbose debug output", 0 },
+	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help", 0 },
 	{},
 };
 
@@ -133,10 +167,18 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 			fs_type = BTRFS;
 		} else if (!strcmp(arg, "ext4")) {
 			fs_type = EXT4;
+		} else if (!strcmp(arg, "fuse")) {
+			fs_type = FUSE;
 		} else if (!strcmp(arg, "nfs")) {
 			fs_type = NFS;
 		} else if (!strcmp(arg, "xfs")) {
 			fs_type = XFS;
+		} else if (!strcmp(arg, "f2fs")) {
+			fs_type = F2FS;
+		} else if (!strcmp(arg, "bcachefs")) {
+			fs_type = BCACHEFS;
+		} else if (!strcmp(arg, "zfs")) {
+			fs_type = ZFS;
 		} else {
 			warn("invalid filesystem\n");
 			argp_usage(state);
@@ -183,19 +225,26 @@ static void alias_parse(char *prog)
 {
 	char *name = basename(prog);
 
-	if (!strcmp(name, "btrfsdist")) {
+	if (strstr(name, "btrfsdist")) {
 		fs_type = BTRFS;
-	} else if (!strcmp(name, "ext4dist")) {
+	} else if (strstr(name, "ext4dist")) {
 		fs_type = EXT4;
-	} else if (!strcmp(name, "nfsdist")) {
+	} else if (strstr(name, "fusedist")) {
+		fs_type = FUSE;
+	} else if (strstr(name, "nfsdist")) {
 		fs_type = NFS;
-	} else if (!strcmp(name, "xfsdist")) {
+	} else if (strstr(name, "xfsdist")) {
 		fs_type = XFS;
+	} else if (strstr(name, "f2fsdist")){
+		fs_type = F2FS;
+	} else if (strstr(name, "bcachefsdist")){
+		fs_type = BCACHEFS;
+	} else if (strstr(name, "zfsdist")) {
+		fs_type = ZFS;
 	}
 }
 
-static int libbpf_print_fn(enum libbpf_print_level level,
-			   const char *format, va_list args)
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
 	if (level == LIBBPF_DEBUG && !verbose)
 		return 0;
@@ -212,7 +261,7 @@ static int print_hists(struct fsdist_bpf__bss *bss)
 	const char *units = timestamp_in_ms ? "msecs" : "usecs";
 	enum fs_file_op op;
 
-	for (op = READ; op < MAX_OP; op++) {
+	for (op = F_READ; op < F_MAX_OP; op++) {
 		struct hist hist = bss->hists[op];
 
 		bss->hists[op] = zero;
@@ -231,10 +280,10 @@ static bool check_fentry()
 	const char *fn_name, *module;
 	bool support_fentry = true;
 
-	for (i = 0; i < MAX_OP; i++) {
+	for (i = 0; i < F_MAX_OP; i++) {
 		fn_name = fs_configs[fs_type].op_funcs[i];
 		module = fs_configs[fs_type].fs;
-		if (fn_name && !fentry_exists(fn_name, module)) {
+		if (fn_name && !fentry_can_attach(fn_name, module)) {
 			support_fentry = false;
 			break;
 		}
@@ -247,17 +296,17 @@ static int fentry_set_attach_target(struct fsdist_bpf *obj)
 	struct fs_config *cfg = &fs_configs[fs_type];
 	int err = 0;
 
-	err = err ?: bpf_program__set_attach_target(obj->progs.file_read_fentry, 0, cfg->op_funcs[READ]);
-	err = err ?: bpf_program__set_attach_target(obj->progs.file_read_fexit, 0, cfg->op_funcs[READ]);
-	err = err ?: bpf_program__set_attach_target(obj->progs.file_write_fentry, 0, cfg->op_funcs[WRITE]);
-	err = err ?: bpf_program__set_attach_target(obj->progs.file_write_fexit, 0, cfg->op_funcs[WRITE]);
-	err = err ?: bpf_program__set_attach_target(obj->progs.file_open_fentry, 0, cfg->op_funcs[OPEN]);
-	err = err ?: bpf_program__set_attach_target(obj->progs.file_open_fexit, 0, cfg->op_funcs[OPEN]);
-	err = err ?: bpf_program__set_attach_target(obj->progs.file_sync_fentry, 0, cfg->op_funcs[FSYNC]);
-	err = err ?: bpf_program__set_attach_target(obj->progs.file_sync_fexit, 0, cfg->op_funcs[FSYNC]);
-	if (cfg->op_funcs[GETATTR]) {
-		err = err ?: bpf_program__set_attach_target(obj->progs.getattr_fentry, 0, cfg->op_funcs[GETATTR]);
-		err = err ?: bpf_program__set_attach_target(obj->progs.getattr_fexit, 0, cfg->op_funcs[GETATTR]);
+	err = err ?: bpf_program__set_attach_target(obj->progs.file_read_fentry, 0, cfg->op_funcs[F_READ]);
+	err = err ?: bpf_program__set_attach_target(obj->progs.file_read_fexit, 0, cfg->op_funcs[F_READ]);
+	err = err ?: bpf_program__set_attach_target(obj->progs.file_write_fentry, 0, cfg->op_funcs[F_WRITE]);
+	err = err ?: bpf_program__set_attach_target(obj->progs.file_write_fexit, 0, cfg->op_funcs[F_WRITE]);
+	err = err ?: bpf_program__set_attach_target(obj->progs.file_open_fentry, 0, cfg->op_funcs[F_OPEN]);
+	err = err ?: bpf_program__set_attach_target(obj->progs.file_open_fexit, 0, cfg->op_funcs[F_OPEN]);
+	err = err ?: bpf_program__set_attach_target(obj->progs.file_sync_fentry, 0, cfg->op_funcs[F_FSYNC]);
+	err = err ?: bpf_program__set_attach_target(obj->progs.file_sync_fexit, 0, cfg->op_funcs[F_FSYNC]);
+	if (cfg->op_funcs[F_GETATTR]) {
+		err = err ?: bpf_program__set_attach_target(obj->progs.getattr_fentry, 0, cfg->op_funcs[F_GETATTR]);
+		err = err ?: bpf_program__set_attach_target(obj->progs.getattr_fexit, 0, cfg->op_funcs[F_GETATTR]);
 	} else {
 		bpf_program__set_autoload(obj->progs.getattr_fentry, false);
 		bpf_program__set_autoload(obj->progs.getattr_fexit, false);
@@ -298,70 +347,60 @@ static int attach_kprobes(struct fsdist_bpf *obj)
 	long err = 0;
 	struct fs_config *cfg = &fs_configs[fs_type];
 
-	/* READ */
-	obj->links.file_read_entry = bpf_program__attach_kprobe(obj->progs.file_read_entry, false, cfg->op_funcs[READ]);
-	err = libbpf_get_error(obj->links.file_read_entry);
-	if (err)
+	/* F_READ */
+	obj->links.file_read_entry = bpf_program__attach_kprobe(obj->progs.file_read_entry, false, cfg->op_funcs[F_READ]);
+	if (!obj->links.file_read_entry)
 		goto errout;
-	obj->links.file_read_exit = bpf_program__attach_kprobe(obj->progs.file_read_exit, true, cfg->op_funcs[READ]);
-	err = libbpf_get_error(obj->links.file_read_exit);
-	if (err)
+	obj->links.file_read_exit = bpf_program__attach_kprobe(obj->progs.file_read_exit, true, cfg->op_funcs[F_READ]);
+	if (!obj->links.file_read_exit)
 		goto errout;
-	/* WRITE */
-	obj->links.file_write_entry = bpf_program__attach_kprobe(obj->progs.file_write_entry, false, cfg->op_funcs[WRITE]);
-	err = libbpf_get_error(obj->links.file_write_entry);
-	if (err)
+	/* F_WRITE */
+	obj->links.file_write_entry = bpf_program__attach_kprobe(obj->progs.file_write_entry, false, cfg->op_funcs[F_WRITE]);
+	if (!obj->links.file_write_entry)
 		goto errout;
-	obj->links.file_write_exit = bpf_program__attach_kprobe(obj->progs.file_write_exit, true, cfg->op_funcs[WRITE]);
-	err = libbpf_get_error(obj->links.file_write_exit);
-	if (err)
+	obj->links.file_write_exit = bpf_program__attach_kprobe(obj->progs.file_write_exit, true, cfg->op_funcs[F_WRITE]);
+	if (!obj->links.file_write_exit)
 		goto errout;
-	/* OPEN */
-	obj->links.file_open_entry = bpf_program__attach_kprobe(obj->progs.file_open_entry, false, cfg->op_funcs[OPEN]);
-	err = libbpf_get_error(obj->links.file_open_entry);
-	if (err)
+	/* F_OPEN */
+	obj->links.file_open_entry = bpf_program__attach_kprobe(obj->progs.file_open_entry, false, cfg->op_funcs[F_OPEN]);
+	if (!obj->links.file_open_entry)
 		goto errout;
-	obj->links.file_open_exit = bpf_program__attach_kprobe(obj->progs.file_open_exit, true, cfg->op_funcs[OPEN]);
-	err = libbpf_get_error(obj->links.file_open_exit);
-	if (err)
+	obj->links.file_open_exit = bpf_program__attach_kprobe(obj->progs.file_open_exit, true, cfg->op_funcs[F_OPEN]);
+	if (!obj->links.file_open_exit)
 		goto errout;
-	/* FSYNC */
-	obj->links.file_sync_entry = bpf_program__attach_kprobe(obj->progs.file_sync_entry, false, cfg->op_funcs[FSYNC]);
-	err = libbpf_get_error(obj->links.file_sync_entry);
-	if (err)
+	/* F_FSYNC */
+	obj->links.file_sync_entry = bpf_program__attach_kprobe(obj->progs.file_sync_entry, false, cfg->op_funcs[F_FSYNC]);
+	if (!obj->links.file_sync_entry)
 		goto errout;
-	obj->links.file_sync_exit = bpf_program__attach_kprobe(obj->progs.file_sync_exit, true, cfg->op_funcs[FSYNC]);
-	err = libbpf_get_error(obj->links.file_sync_exit);
-	if (err)
+	obj->links.file_sync_exit = bpf_program__attach_kprobe(obj->progs.file_sync_exit, true, cfg->op_funcs[F_FSYNC]);
+	if (!obj->links.file_sync_exit)
 		goto errout;
-	/* GETATTR */
-	if (!cfg->op_funcs[GETATTR])
+	/* F_GETATTR */
+	if (!cfg->op_funcs[F_GETATTR])
 		return 0;
-	obj->links.getattr_entry = bpf_program__attach_kprobe(obj->progs.getattr_entry, false, cfg->op_funcs[GETATTR]);
-	err = libbpf_get_error(obj->links.getattr_entry);
-	if (err)
+	obj->links.getattr_entry = bpf_program__attach_kprobe(obj->progs.getattr_entry, false, cfg->op_funcs[F_GETATTR]);
+	if (!obj->links.getattr_entry)
 		goto errout;
-	obj->links.getattr_exit = bpf_program__attach_kprobe(obj->progs.getattr_exit, true, cfg->op_funcs[GETATTR]);
-	err = libbpf_get_error(obj->links.getattr_exit);
-	if (err)
+	obj->links.getattr_exit = bpf_program__attach_kprobe(obj->progs.getattr_exit, true, cfg->op_funcs[F_GETATTR]);
+	if (!obj->links.getattr_exit)
 		goto errout;
 	return 0;
 errout:
+	err = -errno;
 	warn("failed to attach kprobe: %ld\n", err);
 	return err;
 }
 
 int main(int argc, char **argv)
 {
+	LIBBPF_OPTS(bpf_object_open_opts, open_opts);
 	static const struct argp argp = {
 		.options = opts,
 		.parser = parse_arg,
 		.doc = argp_program_doc,
 	};
 	struct fsdist_bpf *skel;
-	struct tm *tm;
 	char ts[32];
-	time_t t;
 	int err;
 	bool support_fentry;
 
@@ -376,13 +415,13 @@ int main(int argc, char **argv)
 
 	libbpf_set_print(libbpf_print_fn);
 
-	err = bump_memlock_rlimit();
+	err = ensure_core_btf(&open_opts);
 	if (err) {
-		warn("failed to increase rlimit: %d\n", err);
+		fprintf(stderr, "failed to fetch necessary BTF for CO-RE: %s\n", strerror(-err));
 		return 1;
 	}
 
-	skel = fsdist_bpf__open();
+	skel = fsdist_bpf__open_opts(&open_opts);
 	if (!skel) {
 		warn("failed to open BPF object\n");
 		return 1;
@@ -435,9 +474,7 @@ int main(int argc, char **argv)
 		printf("\n");
 
 		if (emit_timestamp) {
-			time(&t);
-			tm = localtime(&t);
-			strftime(ts, sizeof(ts), "%H:%M:%S", tm);
+			str_timestamp("%H:%M:%S", ts, sizeof(ts));
 			printf("%-8s\n", ts);
 		}
 
@@ -451,6 +488,7 @@ int main(int argc, char **argv)
 
 cleanup:
 	fsdist_bpf__destroy(skel);
+	cleanup_core_btf(&open_opts);
 
 	return err != 0;
 }

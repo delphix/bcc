@@ -8,6 +8,7 @@
 #include <bpf/bpf.h>
 #include "vfsstat.h"
 #include "vfsstat.skel.h"
+#include "btf_helpers.h"
 #include "trace_helpers.h"
 
 const char *argp_program_version = "vfsstat 0.1";
@@ -22,8 +23,8 @@ static const char argp_program_doc[] =
 static char args_doc[] = "[interval [count]]";
 
 static const struct argp_option opts[] = {
-	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
-	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
+	{ "verbose", 'v', NULL, 0, "Verbose debug output", 0 },
+	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help", 0 },
 	{},
 };
 
@@ -78,30 +79,11 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	return 0;
 }
 
-static int libbpf_print_fn(enum libbpf_print_level level,
-			   const char *format, va_list args)
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
 	return vfprintf(stderr, format, args);
-}
-
-static const char *strftime_now(char *s, size_t max, const char *format)
-{
-	struct tm *tm;
-	time_t t;
-
-	t = time(NULL);
-	tm = localtime(&t);
-	if (tm == NULL) {
-		fprintf(stderr, "localtime: %s\n", strerror(errno));
-		return "<failed>";
-	}
-	if (strftime(s, max, format, tm) == 0) {
-		fprintf(stderr, "strftime error\n");
-		return "<failed>";
-	}
-	return s;
 }
 
 static const char *stat_types_names[] = {
@@ -110,6 +92,9 @@ static const char *stat_types_names[] = {
 	[S_FSYNC] = "FSYNC",
 	[S_OPEN] = "OPEN",
 	[S_CREATE] = "CREATE",
+	[S_UNLINK] = "UNLINK",
+	[S_MKDIR] = "MKDIR",
+	[S_RMDIR] = "RMDIR",
 };
 
 static void print_header(void)
@@ -128,7 +113,8 @@ static void print_and_reset_stats(__u64 stats[S_MAXSTAT])
 	__u64 val;
 	int i;
 
-	printf("%-8s: ", strftime_now(s, sizeof(s), "%H:%M:%S"));
+	str_timestamp("%H:%M:%S", s, sizeof(s));
+	printf("%-8s: ", s);
 	for (i = 0; i < S_MAXSTAT; i++) {
 		val = __atomic_exchange_n(&stats[i], 0, __ATOMIC_RELAXED);
 		printf(" %8llu", val / env.interval);
@@ -138,6 +124,7 @@ static void print_and_reset_stats(__u64 stats[S_MAXSTAT])
 
 int main(int argc, char **argv)
 {
+	LIBBPF_OPTS(bpf_object_open_opts, open_opts);
 	static const struct argp argp = {
 		.options = opts,
 		.parser = parse_arg,
@@ -153,10 +140,10 @@ int main(int argc, char **argv)
 
 	libbpf_set_print(libbpf_print_fn);
 
-	err = bump_memlock_rlimit();
+
+	err = ensure_core_btf(&open_opts);
 	if (err) {
-		fprintf(stderr, "failed to increase rlimit: %s\n",
-				strerror(errno));
+		fprintf(stderr, "failed to fetch necessary BTF for CO-RE: %s\n", strerror(-err));
 		return 1;
 	}
 
@@ -167,18 +154,24 @@ int main(int argc, char **argv)
 	}
 
 	/* It fallbacks to kprobes when kernel does not support fentry. */
-	if (vmlinux_btf_exists() && fentry_exists("vfs_read", NULL)) {
+	if (fentry_can_attach("vfs_read", NULL)) {
 		bpf_program__set_autoload(skel->progs.kprobe_vfs_read, false);
 		bpf_program__set_autoload(skel->progs.kprobe_vfs_write, false);
 		bpf_program__set_autoload(skel->progs.kprobe_vfs_fsync, false);
 		bpf_program__set_autoload(skel->progs.kprobe_vfs_open, false);
 		bpf_program__set_autoload(skel->progs.kprobe_vfs_create, false);
+		bpf_program__set_autoload(skel->progs.kprobe_vfs_unlink, false);
+		bpf_program__set_autoload(skel->progs.kprobe_vfs_mkdir, false);
+		bpf_program__set_autoload(skel->progs.kprobe_vfs_rmdir, false);
 	} else {
 		bpf_program__set_autoload(skel->progs.fentry_vfs_read, false);
 		bpf_program__set_autoload(skel->progs.fentry_vfs_write, false);
 		bpf_program__set_autoload(skel->progs.fentry_vfs_fsync, false);
 		bpf_program__set_autoload(skel->progs.fentry_vfs_open, false);
 		bpf_program__set_autoload(skel->progs.fentry_vfs_create, false);
+		bpf_program__set_autoload(skel->progs.fentry_vfs_unlink, false);
+		bpf_program__set_autoload(skel->progs.fentry_vfs_mkdir, false);
+		bpf_program__set_autoload(skel->progs.fentry_vfs_rmdir, false);
 	}
 
 	err = vfsstat_bpf__load(skel);
@@ -207,6 +200,7 @@ int main(int argc, char **argv)
 
 cleanup:
 	vfsstat_bpf__destroy(skel);
+	cleanup_core_btf(&open_opts);
 
 	return err != 0;
 }

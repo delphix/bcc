@@ -24,6 +24,14 @@ struct sym {
 	const char *name;
 	unsigned long start;
 	unsigned long size;
+	unsigned long offset;
+};
+
+struct sym_info {
+	const char *dso_name;
+	unsigned long dso_offset;
+	const char *sym_name;
+	unsigned long sym_offset;
 };
 
 struct syms;
@@ -32,6 +40,8 @@ struct syms *syms__load_pid(int tgid);
 struct syms *syms__load_file(const char *fname);
 void syms__free(struct syms *syms);
 const struct sym *syms__map_addr(const struct syms *syms, unsigned long addr);
+int syms__map_addr_dso(const struct syms *syms, unsigned long addr,
+		       struct sym_info *sinfo);
 
 struct syms_cache;
 
@@ -58,7 +68,6 @@ void print_linear_hist(unsigned int *vals, int vals_size, unsigned int base,
 		unsigned int step, const char *val_type);
 
 unsigned long long get_ktime_ns(void);
-int bump_memlock_rlimit(void);
 
 bool is_kernel_module(const char *name);
 
@@ -78,7 +87,7 @@ bool is_kernel_module(const char *name);
  * *mod* is a hint that indicates the *name* may reside in module BTF,
  * if NULL, it means *name* belongs to vmlinux.
  */
-bool fentry_exists(const char *name, const char *mod);
+bool fentry_can_attach(const char *name, const char *mod);
 
 /*
  * The name of a kernel function to be attached to may be changed between
@@ -91,8 +100,41 @@ bool fentry_exists(const char *name, const char *mod);
  * which is slower.
  */
 bool kprobe_exists(const char *name);
+bool tracepoint_exists(const char *category, const char *event);
 
 bool vmlinux_btf_exists(void);
 bool module_btf_exists(const char *mod);
+
+bool probe_tp_btf(const char *name);
+bool probe_ringbuf();
+bool probe_bpf_ns_current_pid_tgid(void);
+
+typedef int (*convert_fn_t)(const char *src, void *dest);
+int split_convert(char *s, const char* delim, void *elems, size_t elems_size,
+		  size_t elem_size, convert_fn_t convert);
+/*
+ * Implementations of convert_fn_t.
+ * This can be replaced with a user-defined callback function.
+ */
+/* converts a string to an integer */
+int str_to_int(const char *src, void *dest);
+/* converts a string to a long integer */
+int str_to_long(const char *src, void *dest);
+
+/*
+ * get loadavg string with or without timestamp
+ *
+ * If the @buf_len is not long enough, we still provide a truncated string,
+ * but return -ERANGE.
+ */
+int str_loadavg(char *buf, size_t buf_len);
+
+/*
+ * get format date and time
+ *
+ * this function encapsulates the strftime() function, and the return value
+ * is the same as strftime().
+ */
+int str_timestamp(const char *format, char *buf, size_t buf_len);
 
 #endif /* __TRACE_HELPERS_H */

@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # @lint-avoid-python-3-compatibility-imports
 #
 # runqlat   Run queue (scheduler) latency as a histogram.
@@ -74,19 +74,17 @@ bpf_text = """
 #include <linux/init_task.h>
 
 typedef struct pid_key {
-    u64 id;    // work around
+    u32 id;
     u64 slot;
 } pid_key_t;
 
 typedef struct pidns_key {
-    u64 id;    // work around
+    u32 id;
     u64 slot;
 } pidns_key_t;
 
 BPF_HASH(start, u32);
 STORAGE
-
-struct rq;
 
 // record enqueue timestamp
 static int trace_enqueue(u32 tgid, u32 pid)
@@ -270,14 +268,14 @@ if args.pids or args.tids:
         pid = "pid"
         section = "tid"
     bpf_text = bpf_text.replace('STORAGE',
-        'BPF_HISTOGRAM(dist, pid_key_t);')
+        'BPF_HISTOGRAM(dist, pid_key_t, MAX_PID);')
     bpf_text = bpf_text.replace('STORE',
-        'pid_key_t key = {.id = ' + pid + ', .slot = bpf_log2l(delta)}; ' +
+        'pid_key_t key = {}; key.id = ' + pid + '; key.slot = bpf_log2l(delta); ' +
         'dist.increment(key);')
 elif args.pidnss:
     section = "pidns"
     bpf_text = bpf_text.replace('STORAGE',
-        'BPF_HISTOGRAM(dist, pidns_key_t);')
+        'BPF_HISTOGRAM(dist, pidns_key_t, MAX_PIDNS);')
     bpf_text = bpf_text.replace('STORE', 'pidns_key_t key = ' +
         '{.id = pid_namespace(prev), ' +
         '.slot = bpf_log2l(delta)}; dist.atomic_increment(key);')
@@ -291,12 +289,15 @@ if debug or args.ebpf:
     if args.ebpf:
         exit()
 
+max_pid = int(open("/proc/sys/kernel/pid_max").read())
+max_pidns = int(open("/proc/sys/user/max_pid_namespaces").read())
 # load BPF program
-b = BPF(text=bpf_text)
+b = BPF(text=bpf_text, cflags=["-DMAX_PID=%d" % max_pid,
+                               "-DMAX_PIDNS=%d" % max_pidns])
 if not is_support_raw_tp:
     b.attach_kprobe(event="ttwu_do_wakeup", fn_name="trace_ttwu_do_wakeup")
     b.attach_kprobe(event="wake_up_new_task", fn_name="trace_wake_up_new_task")
-    b.attach_kprobe(event_re="^finish_task_switch$|^finish_task_switch\.isra\.\d$",
+    b.attach_kprobe(event_re=r'^finish_task_switch$|^finish_task_switch\.isra\.\d$',
                     fn_name="trace_run")
 
 print("Tracing run queue latency... Hit Ctrl-C to end.")

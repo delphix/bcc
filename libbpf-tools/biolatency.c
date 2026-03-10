@@ -7,10 +7,12 @@
 #include <signal.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <time.h>
 #include <bpf/libbpf.h>
 #include <sys/resource.h>
 #include <bpf/bpf.h>
+#include <bpf/btf.h>
 #include "blk_types.h"
 #include "biolatency.h"
 #include "biolatency.skel.h"
@@ -28,6 +30,8 @@ static struct env {
 	bool per_flag;
 	bool milliseconds;
 	bool verbose;
+	char *cgroupspath;
+	bool cg;
 } env = {
 	.interval = 99999999,
 	.times = 99999999,
@@ -41,7 +45,7 @@ const char *argp_program_bug_address =
 const char argp_program_doc[] =
 "Summarize block device I/O latency as a histogram.\n"
 "\n"
-"USAGE: biolatency [--help] [-T] [-m] [-Q] [-D] [-F] [-d DISK] [interval] [count]\n"
+"USAGE: biolatency [--help] [-T] [-m] [-Q] [-D] [-F] [-d DISK] [-c CG] [interval] [count]\n"
 "\n"
 "EXAMPLES:\n"
 "    biolatency              # summarize block I/O latency as a histogram\n"
@@ -50,17 +54,19 @@ const char argp_program_doc[] =
 "    biolatency -Q           # include OS queued time in I/O time\n"
 "    biolatency -D           # show each disk device separately\n"
 "    biolatency -F           # show I/O flags separately\n"
-"    biolatency -d sdc       # Trace sdc only\n";
+"    biolatency -d sdc       # Trace sdc only\n"
+"    biolatency -c CG        # Trace process under cgroupsPath CG\n";
 
 static const struct argp_option opts[] = {
-	{ "timestamp", 'T', NULL, 0, "Include timestamp on output" },
-	{ "milliseconds", 'm', NULL, 0, "Millisecond histogram" },
-	{ "queued", 'Q', NULL, 0, "Include OS queued time in I/O time" },
-	{ "disk", 'D', NULL, 0, "Print a histogram per disk device" },
-	{ "flag", 'F', NULL, 0, "Print a histogram per set of I/O flags" },
-	{ "disk",  'd', "DISK",  0, "Trace this disk only" },
-	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
-	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
+	{ "timestamp", 'T', NULL, 0, "Include timestamp on output", 0 },
+	{ "milliseconds", 'm', NULL, 0, "Millisecond histogram", 0 },
+	{ "queued", 'Q', NULL, 0, "Include OS queued time in I/O time", 0 },
+	{ "disk", 'D', NULL, 0, "Print a histogram per disk device", 0 },
+	{ "flag", 'F', NULL, 0, "Print a histogram per set of I/O flags", 0 },
+	{ "disk",  'd', "DISK",  0, "Trace this disk only", 0 },
+	{ "verbose", 'v', NULL, 0, "Verbose debug output", 0 },
+	{ "cgroup", 'c', "/sys/fs/cgroup/unified", 0, "Trace process in cgroup path", 0 },
+	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help", 0 },
 	{},
 };
 
@@ -89,6 +95,10 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 		break;
 	case 'T':
 		env.timestamp = true;
+		break;
+	case 'c':
+		env.cgroupspath = arg;
+		env.cg = true;
 		break;
 	case 'd':
 		env.disk = arg;
@@ -124,8 +134,7 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	return 0;
 }
 
-int libbpf_print_fn(enum libbpf_print_level level,
-		const char *format, va_list args)
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
@@ -185,8 +194,7 @@ static void print_cmd_flags(int cmd_flags)
 		printf("Unknown");
 }
 
-static
-int print_log2_hists(struct bpf_map *hists, struct partitions *partitions)
+static int print_log2_hists(struct bpf_map *hists, struct partitions *partitions)
 {
 	struct hist_key lookup_key = { .cmd_flags = -1 }, next_key;
 	const char *units = env.milliseconds ? "msecs" : "usecs";
@@ -226,6 +234,39 @@ int print_log2_hists(struct bpf_map *hists, struct partitions *partitions)
 	return 0;
 }
 
+/*
+ * BTF has a func proto for each tracepoint, let's check it like
+ *   typedef void (*btf_trace_block_rq_issue)(void *, struct request *);
+ *
+ * Actually it's a typedef for a pointer to the func proto.
+ */
+static bool has_block_rq_issue_single_arg(void)
+{
+	const struct btf *btf = btf__load_vmlinux_btf();
+	const struct btf_type *t1, *t2, *t3;
+	__u32 type_id;
+	bool ret = true;  // assuming recent kernels
+
+	type_id = btf__find_by_name_kind(btf, "btf_trace_block_rq_issue",
+					 BTF_KIND_TYPEDEF);
+	if ((__s32)type_id < 0)
+		return ret;
+
+	t1 = btf__type_by_id(btf, type_id);
+	if (t1 == NULL)
+		return ret;
+
+	t2 = btf__type_by_id(btf, t1->type);
+	if (t2 == NULL || !btf_is_ptr(t2))
+		return ret;
+
+	t3 = btf__type_by_id(btf, t2->type);
+	if (t3 && btf_is_func_proto(t3))
+		ret = (btf_vlen(t3) == 2); // ctx + arg
+
+	return ret;
+}
+
 int main(int argc, char **argv)
 {
 	struct partitions *partitions = NULL;
@@ -236,22 +277,16 @@ int main(int argc, char **argv)
 		.doc = argp_program_doc,
 	};
 	struct biolatency_bpf *obj;
-	struct tm *tm;
 	char ts[32];
-	time_t t;
 	int err;
+	int idx, cg_map_fd;
+	int cgfd = -1;
 
 	err = argp_parse(&argp, argc, argv, 0, NULL, NULL);
 	if (err)
 		return err;
 
 	libbpf_set_print(libbpf_print_fn);
-
-	err = bump_memlock_rlimit();
-	if (err) {
-		fprintf(stderr, "failed to increase rlimit: %d\n", err);
-		return 1;
-	}
 
 	obj = biolatency_bpf__open();
 	if (!obj) {
@@ -272,12 +307,29 @@ int main(int argc, char **argv)
 			fprintf(stderr, "invaild partition name: not exist\n");
 			goto cleanup;
 		}
+		obj->rodata->filter_dev = true;
 		obj->rodata->targ_dev = partition->dev;
 	}
 	obj->rodata->targ_per_disk = env.per_disk;
 	obj->rodata->targ_per_flag = env.per_flag;
 	obj->rodata->targ_ms = env.milliseconds;
 	obj->rodata->targ_queued = env.queued;
+	obj->rodata->filter_cg = env.cg;
+	obj->rodata->targ_single = has_block_rq_issue_single_arg();
+
+	if (probe_tp_btf("block_rq_insert")) {
+		bpf_program__set_autoload(obj->progs.block_rq_insert, false);
+		bpf_program__set_autoload(obj->progs.block_rq_issue, false);
+		bpf_program__set_autoload(obj->progs.block_rq_complete, false);
+		if (!env.queued)
+			bpf_program__set_autoload(obj->progs.block_rq_insert_btf, false);
+	} else {
+		bpf_program__set_autoload(obj->progs.block_rq_insert_btf, false);
+		bpf_program__set_autoload(obj->progs.block_rq_issue_btf, false);
+		bpf_program__set_autoload(obj->progs.block_rq_complete_btf, false);
+		if (!env.queued)
+			bpf_program__set_autoload(obj->progs.block_rq_insert, false);
+	}
 
 	err = biolatency_bpf__load(obj);
 	if (err) {
@@ -285,27 +337,24 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
-	if (env.queued) {
-		obj->links.block_rq_insert =
-			bpf_program__attach(obj->progs.block_rq_insert);
-		err = libbpf_get_error(obj->links.block_rq_insert);
-		if (err) {
-			fprintf(stderr, "failed to attach: %s\n", strerror(-err));
+	/* update cgroup path fd to map */
+	if (env.cg) {
+		idx = 0;
+		cg_map_fd = bpf_map__fd(obj->maps.cgroup_map);
+		cgfd = open(env.cgroupspath, O_RDONLY);
+		if (cgfd < 0) {
+			fprintf(stderr, "Failed opening Cgroup path: %s", env.cgroupspath);
+			goto cleanup;
+		}
+		if (bpf_map_update_elem(cg_map_fd, &idx, &cgfd, BPF_ANY)) {
+			fprintf(stderr, "Failed adding target cgroup to map");
 			goto cleanup;
 		}
 	}
-	obj->links.block_rq_issue =
-		bpf_program__attach(obj->progs.block_rq_issue);
-	err = libbpf_get_error(obj->links.block_rq_issue);
+
+	err = biolatency_bpf__attach(obj);
 	if (err) {
-		fprintf(stderr, "failed to attach: %s\n", strerror(-err));
-		goto cleanup;
-	}
-	obj->links.block_rq_complete =
-		bpf_program__attach(obj->progs.block_rq_complete);
-	err = libbpf_get_error(obj->links.block_rq_complete);
-	if (err) {
-		fprintf(stderr, "failed to attach: %s\n", strerror(-err));
+		fprintf(stderr, "failed to attach BPF object: %d\n", err);
 		goto cleanup;
 	}
 
@@ -319,9 +368,7 @@ int main(int argc, char **argv)
 		printf("\n");
 
 		if (env.timestamp) {
-			time(&t);
-			tm = localtime(&t);
-			strftime(ts, sizeof(ts), "%H:%M:%S", tm);
+			str_timestamp("%H:%M:%S", ts, sizeof(ts));
 			printf("%-8s\n", ts);
 		}
 
@@ -336,6 +383,8 @@ int main(int argc, char **argv)
 cleanup:
 	biolatency_bpf__destroy(obj);
 	partitions__free(partitions);
+	if (cgfd > 0)
+		close(cgfd);
 
 	return err != 0;
 }

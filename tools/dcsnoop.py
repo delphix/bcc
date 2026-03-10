@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # @lint-avoid-python-3-compatibility-imports
 #
 # dcsnoop   Trace directory entry cache (dcache) lookups.
@@ -137,7 +137,7 @@ if args.ebpf:
 # initialize BPF
 b = BPF(text=bpf_text)
 if args.all:
-    b.attach_kprobe(event_re="^lookup_fast$|^lookup_fast.constprop.*.\d$", fn_name="trace_fast")
+    b.attach_kprobe(event_re=r'^lookup_fast$|^lookup_fast.constprop.*.\d$', fn_name="trace_fast")
 
 mode_s = {
     0: 'M',
@@ -148,13 +148,13 @@ start_ts = time.time()
 
 def print_event(cpu, data, size):
     event = b["events"].event(data)
-    print("%-11.6f %-6d %-16s %1s %s" % (
+    print("%-11.6f %-7d %-16s %1s %s" % (
             time.time() - start_ts, event.pid,
             event.comm.decode('utf-8', 'replace'), mode_s[event.type],
             event.filename.decode('utf-8', 'replace')))
 
 # header
-print("%-11s %-6s %-16s %1s %s" % ("TIME(s)", "PID", "COMM", "T", "FILE"))
+print("%-11s %-7s %-16s %1s %s" % ("TIME(s)", "PID", "COMM", "T", "FILE"))
 
 b["events"].open_perf_buffer(print_event, page_cnt=64)
 while 1:

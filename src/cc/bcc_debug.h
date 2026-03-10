@@ -15,29 +15,20 @@
  */
 
 #include "bpf_module.h"
+#include "frontends/clang/loader.h"
 
 namespace ebpf {
 
 class SourceDebugger {
  public:
-  SourceDebugger(
-      llvm::Module *mod,
-      sec_map_def &sections,
-      const std::string &fn_prefix, const std::string &mod_src,
-      std::map<std::string, std::string> &src_dbg_fmap)
+  SourceDebugger(llvm::Module *mod, sec_map_def &sections,
+                 ProgFuncInfo &prog_func_info, const std::string &mod_src,
+                 std::map<std::string, std::string> &src_dbg_fmap)
       : mod_(mod),
         sections_(sections),
-        fn_prefix_(fn_prefix),
+        prog_func_info_(prog_func_info),
         mod_src_(mod_src),
         src_dbg_fmap_(src_dbg_fmap) {}
-// Only support dump for llvm 6.x and later.
-//
-// The llvm 5.x, but not earlier versions, also supports create
-// a dwarf context for source debugging based
-// on a set of in-memory sections with slightly different interfaces.
-// FIXME: possibly to support 5.x
-//
-#if LLVM_MAJOR_VERSION >= 6
   void dump();
 
  private:
@@ -48,15 +39,11 @@ class SourceDebugger {
                    uint32_t &CurrentSrcLine, llvm::raw_ostream &os);
   void getDebugSections(
       llvm::StringMap<std::unique_ptr<llvm::MemoryBuffer>> &DebugSections);
-#else
-  void dump() {
-  }
-#endif
 
  private:
   llvm::Module *mod_;
   const sec_map_def &sections_;
-  const std::string &fn_prefix_;
+  ProgFuncInfo &prog_func_info_;
   const std::string &mod_src_;
   std::map<std::string, std::string> &src_dbg_fmap_;
 };

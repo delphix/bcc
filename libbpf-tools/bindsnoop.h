@@ -5,14 +5,14 @@
 #define TASK_COMM_LEN	16
 
 struct bind_event {
-	unsigned __int128 addr;
+	__u8 addr[16];
 	__u64 ts_us;
 	__u32 pid;
 	__u32 bound_dev_if;
 	int ret;
 	__u16 port;
+	__u16 proto;
 	__u8 opts;
-	__u8 proto;
 	__u8 ver;
 	char task[TASK_COMM_LEN];
 };

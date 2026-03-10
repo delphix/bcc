@@ -12,6 +12,7 @@
   - [Amazon Linux 1](#amazon-linux-1---binary)
   - [Amazon Linux 2](#amazon-linux-2---binary)
   - [Alpine](#alpine---binary)
+  - [WSL](#wslwindows-subsystem-for-linux---binary)
 * [Source](#source)
   - [libbpf Submodule](#libbpf-submodule)
   - [Debian](#debian---source)
@@ -66,7 +67,14 @@ Kernel compile flags can usually be checked by looking at `/proc/config.gz` or
 
 ## Debian - Binary
 
-`bcc` and its tools are available in the standard Debian main repository, from the source package [bpfcc](https://packages.debian.org/source/sid/bpfcc) under the names `bpfcc-tools`, `python-bpfcc`, `libbpfcc` and `libbpfcc-dev`.
+`bcc` and its tools are available in the standard Debian main repository, from the source package [bpfcc](https://packages.debian.org/source/sid/bpfcc) under the names `bpfcc-tools`, `python3-bpfcc`, `libbpfcc` and `libbpfcc-dev`.
+
+To install:
+
+```bash
+echo deb http://cloudfront.debian.net/debian sid main >> /etc/apt/sources.list
+sudo apt-get install -y bpfcc-tools libbpfcc libbpfcc-dev linux-headers-$(uname -r)
+```
 
 ## Ubuntu - Binary
 
@@ -109,7 +117,7 @@ echo "deb https://repo.iovisor.org/apt/$(lsb_release -cs) $(lsb_release -cs) mai
 sudo apt-get update
 sudo apt-get install bcc-tools libbcc-examples linux-headers-$(uname -r)
 ```
-(replace `xenial` with `artful` or `bionic` as appropriate). Tools will be installed under /usr/share/bcc/tools.
+Tools will be installed under /usr/share/bcc/tools.
 
 **Upstream Nightly Packages**
 
@@ -235,11 +243,9 @@ sudo yum install bcc
 
 ## Amazon Linux 2 - Binary
 Use case 1. Install BCC for your AMI's default kernel (no reboot required):
-   Tested on Amazon Linux AMI release 2020.03 (kernel 4.14.154-128.181.amzn2.x86_64)
+   Tested on Amazon Linux AMI release 2021.11 (kernel 5.10.75-79.358.amzn2.x86_64)
 ```
-sudo amazon-linux-extras enable BCC
-sudo yum install kernel-devel-$(uname -r)
-sudo yum install bcc
+sudo amazon-linux-extras install BCC
 ```
 
 ## Alpine - Binary
@@ -270,6 +276,44 @@ sudo docker run --rm -it --privileged \
   -v /sys:/sys:ro \
   -v /usr/src:/usr/src:ro \
   alpine:3.12
+```
+
+## WSL(Windows Subsystem for Linux) - Binary
+
+### Install dependencies
+The compiling depends on the headers and lib of linux kernel module which was not found in wsl distribution packages repo. We have to compile the kernel module manually.
+```bash
+apt-get install flex bison libssl-dev libelf-dev dwarves bc
+```
+### Install packages
+
+First, you will need to checkout the WSL2 Linux kernel git repository:
+```
+KERNEL_VERSION=$(uname -r | cut -d '.' -f 1-2 | xargs -I {} echo "{}.y")
+git clone --depth 1 https://github.com/microsoft/WSL2-Linux-Kernel.git -b linux-msft-wsl-$KERNEL_VERSION
+cd WSL2-Linux-Kernel
+```
+
+Then compile and install:
+```
+cp Microsoft/config-wsl .config
+make oldconfig && make prepare
+make scripts
+make modules
+sudo make modules_install
+````
+
+After install the module you will need to change the name of the directory to remove the '+' at the end
+
+````
+mv /lib/modules/$KERNEL_VERSION-microsoft-standard-WSL2+/ /lib/modules/$KERNEL_VERSION-microsoft-standard-WSL2
+````
+
+Then you can install bcc tools package according your distribution.
+
+If you met some problems, try to
+```
+sudo mount -t debugfs debugfs /sys/kernel/debug
 ```
 
 # Source
@@ -305,7 +349,8 @@ sudo apt-get install arping bison clang-format cmake dh-python \
   dpkg-dev pkg-kde-tools ethtool flex inetutils-ping iperf \
   libbpf-dev libclang-dev libclang-cpp-dev libedit-dev libelf-dev \
   libfl-dev libzip-dev linux-libc-dev llvm-dev libluajit-5.1-dev \
-  luajit python3-netaddr python3-pyroute2 python3-distutils python3
+  luajit python3-netaddr python3-pyroute2 python3-setuptools python3 \
+  zip libpolly-19-dev
 ```
 
 #### Install and compile BCC
@@ -324,28 +369,44 @@ To build the toolchain from source, one needs:
 * Clang, built from the same tree as LLVM
 * cmake (>=3.1), gcc (>=4.7), flex, bison
 * LuaJIT, if you want Lua support
+* Optional tools used in some examples: arping, netperf, and iperf
 
 ### Install build dependencies
 ```
-# Trusty (14.04 LTS) and older
-VER=trusty
-echo "deb http://llvm.org/apt/$VER/ llvm-toolchain-$VER-3.7 main
-deb-src http://llvm.org/apt/$VER/ llvm-toolchain-$VER-3.7 main" | \
-  sudo tee /etc/apt/sources.list.d/llvm.list
-wget -O - http://llvm.org/apt/llvm-snapshot.gpg.key | sudo apt-key add -
-sudo apt-get update
+# For Focal (20.04.1 LTS)
+sudo apt install -y zip bison build-essential cmake flex git libedit-dev \
+  libllvm12 llvm-12-dev libclang-12-dev python zlib1g-dev libelf-dev libfl-dev python3-setuptools \
+  liblzma-dev arping netperf iperf
 
-# For Bionic (18.04 LTS)
-sudo apt-get -y install bison build-essential cmake flex git libedit-dev \
-  libllvm6.0 llvm-6.0-dev libclang-6.0-dev python zlib1g-dev libelf-dev libfl-dev python3-distutils
+# For Hirsute (21.04) or Impish (21.10)
+sudo apt install -y zip bison build-essential cmake flex git libedit-dev \
+  libllvm12 llvm-12-dev libclang-12-dev python3 zlib1g-dev libelf-dev libfl-dev python3-setuptools \
+  liblzma-dev arping netperf iperf
 
-# For Eoan (19.10) or Focal (20.04.1 LTS)
-sudo apt install -y bison build-essential cmake flex git libedit-dev \
-  libllvm7 llvm-7-dev libclang-7-dev python zlib1g-dev libelf-dev libfl-dev python3-distutils
+# For Jammy (22.04)
+sudo apt install -y zip bison build-essential cmake flex git libedit-dev \
+  libllvm14 llvm-14-dev libclang-14-dev python3 zlib1g-dev libelf-dev libfl-dev python3-setuptools \
+  liblzma-dev libdebuginfod-dev arping netperf iperf
+
+# For Lunar Lobster (23.04)
+sudo apt install -y zip bison build-essential cmake flex git libedit-dev \
+  libllvm15 llvm-15-dev libclang-15-dev python3 zlib1g-dev libelf-dev libfl-dev python3-setuptools \
+  liblzma-dev libdebuginfod-dev arping netperf iperf libpolly-15-dev
+
+# For Mantic Minotaur (23.10)
+sudo apt install -y zip bison build-essential cmake flex git libedit-dev \
+  libllvm16 llvm-16-dev libclang-16-dev python3 zlib1g-dev libelf-dev libfl-dev python3-setuptools \
+  liblzma-dev libdebuginfod-dev arping netperf iperf libpolly-16-dev
+
+# For Noble Numbat (24.04)
+sudo apt install -y zip bison build-essential cmake flex git libedit-dev \
+  libllvm18 llvm-18-dev libclang-18-dev python3 zlib1g-dev libelf-dev libfl-dev python3-setuptools \
+  liblzma-dev libdebuginfod-dev arping netperf iperf libpolly-18-dev
 
 # For other versions
-sudo apt-get -y install bison build-essential cmake flex git libedit-dev \
-  libllvm3.7 llvm-3.7-dev libclang-3.7-dev python zlib1g-dev libelf-dev python3-distutils
+sudo apt-get -y install zip bison build-essential cmake flex git libedit-dev \
+  libllvm3.7 llvm-3.7-dev libclang-3.7-dev python zlib1g-dev libelf-dev python3-setuptools \
+  liblzma-dev arping netperf iperf
 
 # For Lua support
 sudo apt-get -y install luajit luajit-5.1-dev
@@ -364,6 +425,56 @@ pushd src/python/
 make
 sudo make install
 popd
+```
+
+## CentOS-8.5 - Source
+suppose you're running with root or add sudo first
+
+### Install build dependencies
+```
+dnf install -y bison cmake ethtool flex git iperf3 libstdc++-devel python3-netaddr python3-pip gcc gcc-c++ make zlib-devel elfutils-libelf-devel
+# dnf install -y luajit luajit-devel ## if use luajit, will report some lua function(which in lua5.3) undefined problem
+dnf install -y clang clang-devel llvm llvm-devel llvm-static ncurses-devel
+dnf -y install netperf
+pip3 install pyroute2
+ln -s /usr/bin/python3 /usr/bin/python
+```
+### Install and Compile bcc
+```
+git clone https://github.com/iovisor/bcc.git
+
+mkdir bcc-build
+cd bcc-build/
+
+## here llvm should always link shared library
+cmake ../bcc -DCMAKE_INSTALL_PREFIX=/usr -DENABLE_LLVM_SHARED=1
+make -j10
+make install
+
+```
+after install, you may add bcc directory to your $PATH, which you can add to ~/.bashrc
+```
+bcctools=/usr/share/bcc/tools
+bccexamples=/usr/share/bcc/examples
+export PATH=$bcctools:$bccexamples:$PATH
+```
+### let path take effect
+```
+source ~/.bashrc
+```
+then run
+```
+hello_world.py
+```
+Or
+```
+cd /usr/share/bcc/examples
+./hello_world.py
+./tracing/bitehist.py
+
+cd /usr/share/bcc/tools
+./bitesize
+
 ```
 
 ## Fedora - Source
@@ -421,7 +532,7 @@ sudo zypper in lua51-luajit-devel # for lua support in openSUSE Tumbleweed
 git clone https://github.com/iovisor/bcc.git
 mkdir bcc/build; cd bcc/build
 cmake -DLUAJIT_INCLUDE_DIR=`pkg-config --variable=includedir luajit` \ # for lua support
-      ..
+      -DENABLE_LLVM_SHARED=1 ..
 make
 sudo make install
 cmake -DPYTHON_CMD=python3 .. # build python3 binding
@@ -450,23 +561,23 @@ sudo yum install -y luajit luajit-devel  # for Lua support
 You could compile LLVM from source code
 
 ```
-curl  -LO  http://releases.llvm.org/7.0.1/llvm-7.0.1.src.tar.xz
-curl  -LO  http://releases.llvm.org/7.0.1/cfe-7.0.1.src.tar.xz
-tar -xf cfe-7.0.1.src.tar.xz
-tar -xf llvm-7.0.1.src.tar.xz
+curl -LO https://github.com/llvm/llvm-project/releases/download/llvmorg-10.0.1/llvm-10.0.1.src.tar.xz
+curl -LO https://github.com/llvm/llvm-project/releases/download/llvmorg-10.0.1/clang-10.0.1.src.tar.xz
+tar -xf clang-10.0.1.src.tar.xz
+tar -xf llvm-10.0.1.src.tar.xz
 
 mkdir clang-build
 mkdir llvm-build
 
 cd llvm-build
 cmake3 -G "Unix Makefiles" -DLLVM_TARGETS_TO_BUILD="BPF;X86" \
-  -DCMAKE_BUILD_TYPE=Release ../llvm-7.0.1.src
+  -DCMAKE_BUILD_TYPE=Release ../llvm-10.0.1.src
 make
 sudo make install
 
 cd ../clang-build
 cmake3 -G "Unix Makefiles" -DLLVM_TARGETS_TO_BUILD="BPF;X86" \
-  -DCMAKE_BUILD_TYPE=Release ../cfe-7.0.1.src
+  -DCMAKE_BUILD_TYPE=Release ../clang-10.0.1.src
 make
 sudo make install
 cd ..
@@ -477,8 +588,8 @@ or install from centos-release-scl
 ```
 yum install -y centos-release-scl
 yum-config-manager --enable rhel-server-rhscl-7-rpms
-yum install -y devtoolset-7 llvm-toolset-7 llvm-toolset-7-llvm-devel llvm-toolset-7-llvm-static llvm-toolset-7-clang-devel
-source scl_source enable devtoolset-7 llvm-toolset-7
+yum install -y devtoolset-7 llvm-toolset-10 llvm-toolset-10-llvm-devel llvm-toolset-10-llvm-static llvm-toolset-10-clang-devel
+source scl_source enable devtoolset-7 llvm-toolset-10
 ```
 
 For permanently enable scl environment, please check https://access.redhat.com/solutions/527703.
@@ -622,7 +733,7 @@ git clone https://github.com/iovisor/bcc.git
 pushd .
 mkdir bcc/build
 cd bcc/build
-cmake .. -DPYTHON_CMD=python3 # for python3 support
+cmake -DENABLE_LLVM_SHARED=on .. -DPYTHON_CMD=python3 # for python3 support
 make -j$(nproc)
 sudo make install
 cd src/python

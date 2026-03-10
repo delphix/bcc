@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # @lint-avoid-python-3-compatibility-imports
 #
 # swapin        Count swapins by process.
@@ -13,6 +13,7 @@
 # When copying or porting, include this comment.
 #
 # 03-Jul-2019   Brendan Gregg   Ported from bpftrace to BCC.
+# 31-May-2024   Rong Tao        Support folio
 
 from __future__ import print_function
 from bcc import BPF
@@ -46,7 +47,7 @@ struct key_t {
 
 BPF_HASH(counts, struct key_t, u64);
 
-int kprobe__swap_readpage(struct pt_regs *ctx)
+int trace_swap_read(struct pt_regs *ctx)
 {
     u64 *val, zero = 0;
     u32 tgid = bpf_get_current_pid_tgid() >> 32;
@@ -62,6 +63,20 @@ if debug or args.ebpf:
     if args.ebpf:
         exit()
 
+# check whether hash table batch ops is supported
+htab_batch_ops = True if BPF.kernel_struct_has_field(b'bpf_map_ops',
+        b'map_lookup_and_delete_batch') == 1 else False
+
+if b.get_kprobe_functions(b"swap_readpage"):
+    b.attach_kprobe(event="swap_readpage", fn_name="trace_swap_read")
+elif b.get_kprobe_functions(b"swap_read_folio"):
+    b.attach_kprobe(event="swap_read_folio", fn_name="trace_swap_read")
+else:
+    print("ERROR: swap_readpage() and swap_read_folio() kernel function"
+          " not found or traceable. "
+          "The kernel might be too old or the the function has been inlined.")
+    exit(1)
+
 print("Counting swap ins. Ctrl-C to end.");
 
 # output
@@ -74,12 +89,14 @@ while 1:
 
     if not args.notime:
         print(strftime("%H:%M:%S"))
-    print("%-16s %-6s %s" % ("COMM", "PID", "COUNT"))
+    print("%-16s %-7s %s" % ("COMM", "PID", "COUNT"))
     counts = b.get_table("counts")
-    for k, v in sorted(counts.items(),
+    for k, v in sorted(counts.items_lookup_and_delete_batch()
+                       if htab_batch_ops else counts.items(),
 		       key=lambda counts: counts[1].value):
-        print("%-16s %-6d %d" % (k.comm, k.pid, v.value))
-    counts.clear()
+        print("%-16s %-7d %d" % (k.comm, k.pid, v.value))
+    if not htab_batch_ops:
+        counts.clear()
     print()
 
     countdown -= 1

@@ -17,19 +17,23 @@
 #define _GNU_SOURCE
 #endif
 
+#include "libbpf.h"
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <libgen.h>
 #include <limits.h>
 #include <linux/bpf.h>
 #include <linux/bpf_common.h>
+#include <linux/if_alg.h>
 #include <linux/if_packet.h>
-#include <linux/types.h>
 #include <linux/perf_event.h>
 #include <linux/pkt_cls.h>
 #include <linux/rtnetlink.h>
 #include <linux/sched.h>
+#include <linux/types.h>
 #include <linux/unistd.h>
 #include <linux/version.h>
 #include <net/ethernet.h>
@@ -38,7 +42,6 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <libgen.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/resource.h>
@@ -46,9 +49,8 @@
 #include <sys/types.h>
 #include <sys/vfs.h>
 #include <unistd.h>
-#include <linux/if_alg.h>
 
-#include "libbpf.h"
+#include "bcc_zip.h"
 #include "perf_reader.h"
 
 // TODO: Remove this when CentOS 6 support is not needed anymore
@@ -283,6 +285,39 @@ static struct bpf_helper helpers[] = {
   {"get_branch_snapshot", "5.16"},
   {"trace_vprintk", "5.16"},
   {"skc_to_unix_sock", "5.16"},
+  {"kallsyms_lookup_name", "5.16"},
+  {"find_vma", "5.17"},
+  {"loop", "5.17"},
+  {"strncmp", "5.17"},
+  {"get_func_arg", "5.17"},
+  {"get_func_ret", "5.17"},
+  {"get_func_ret", "5.17"},
+  {"get_retval", "5.18"},
+  {"set_retval", "5.18"},
+  {"xdp_get_buff_len", "5.18"},
+  {"xdp_load_bytes", "5.18"},
+  {"xdp_store_bytes", "5.18"},
+  {"copy_from_user_task", "5.18"},
+  {"skb_set_tstamp", "5.18"},
+  {"ima_file_hash", "5.18"},
+  {"kptr_xchg", "5.19"},
+  {"map_lookup_percpu_elem", "5.19"},
+  {"skc_to_mptcp_sock", "5.19"},
+  {"dynptr_from_mem", "5.19"},
+  {"ringbuf_reserve_dynptr", "5.19"},
+  {"ringbuf_submit_dynptr", "5.19"},
+  {"ringbuf_discard_dynptr", "5.19"},
+  {"dynptr_read", "5.19"},
+  {"dynptr_write", "5.19"},
+  {"dynptr_data", "5.19"},
+  {"tcp_raw_gen_syncookie_ipv4", "6.0"},
+  {"tcp_raw_gen_syncookie_ipv6", "6.0"},
+  {"tcp_raw_check_syncookie_ipv4", "6.0"},
+  {"tcp_raw_check_syncookie_ipv6", "6.0"},
+  {"ktime_get_tai_ns", "6.1"},
+  {"user_ringbuf_drain", "6.1"},
+  {"cgrp_storage_get", "6.2"},
+  {"cgrp_storage_delete", "6.2"},
 };
 
 static uint64_t ptr_to_u64(void *ptr)
@@ -290,14 +325,33 @@ static uint64_t ptr_to_u64(void *ptr)
   return (uint64_t) (unsigned long) ptr;
 }
 
-int bcc_create_map_xattr(struct bpf_create_map_attr *attr, bool allow_rlimit)
+static int libbpf_bpf_map_create(struct bcc_create_map_attr *create_attr)
+{
+  LIBBPF_OPTS(bpf_map_create_opts, p);
+
+  p.map_flags = create_attr->map_flags;
+  p.numa_node = create_attr->numa_node;
+  p.btf_fd = create_attr->btf_fd;
+  p.btf_key_type_id = create_attr->btf_key_type_id;
+  p.btf_value_type_id = create_attr->btf_value_type_id;
+  p.map_ifindex = create_attr->map_ifindex;
+  if (create_attr->map_type == BPF_MAP_TYPE_STRUCT_OPS)
+    p.btf_vmlinux_value_type_id = create_attr->btf_vmlinux_value_type_id;
+  else
+    p.inner_map_fd = create_attr->inner_map_fd;
+
+  return bpf_map_create(create_attr->map_type, create_attr->name, create_attr->key_size,
+                        create_attr->value_size, create_attr->max_entries, &p);
+}
+
+int bcc_create_map_xattr(struct bcc_create_map_attr *attr, bool allow_rlimit)
 {
   unsigned name_len = attr->name ? strlen(attr->name) : 0;
   char map_name[BPF_OBJ_NAME_LEN] = {};
 
   memcpy(map_name, attr->name, min(name_len, BPF_OBJ_NAME_LEN - 1));
   attr->name = map_name;
-  int ret = bpf_create_map_xattr(attr);
+  int ret = libbpf_bpf_map_create(attr);
 
   if (ret < 0 && errno == EPERM) {
     if (!allow_rlimit)
@@ -309,7 +363,7 @@ int bcc_create_map_xattr(struct bpf_create_map_attr *attr, bool allow_rlimit)
       rl.rlim_max = RLIM_INFINITY;
       rl.rlim_cur = rl.rlim_max;
       if (setrlimit(RLIMIT_MEMLOCK, &rl) == 0)
-        ret = bpf_create_map_xattr(attr);
+        ret = libbpf_bpf_map_create(attr);
     }
   }
 
@@ -319,12 +373,12 @@ int bcc_create_map_xattr(struct bpf_create_map_attr *attr, bool allow_rlimit)
     attr->btf_fd = 0;
     attr->btf_key_type_id = 0;
     attr->btf_value_type_id = 0;
-    ret = bpf_create_map_xattr(attr);
+    ret = libbpf_bpf_map_create(attr);
   }
 
   if (ret < 0 && name_len && (errno == E2BIG || errno == EINVAL)) {
     map_name[0] = '\0';
-    ret = bpf_create_map_xattr(attr);
+    ret = libbpf_bpf_map_create(attr);
   }
 
   if (ret < 0 && errno == EPERM) {
@@ -337,7 +391,7 @@ int bcc_create_map_xattr(struct bpf_create_map_attr *attr, bool allow_rlimit)
       rl.rlim_max = RLIM_INFINITY;
       rl.rlim_cur = rl.rlim_max;
       if (setrlimit(RLIMIT_MEMLOCK, &rl) == 0)
-        ret = bpf_create_map_xattr(attr);
+        ret = libbpf_bpf_map_create(attr);
     }
   }
   return ret;
@@ -347,7 +401,7 @@ int bcc_create_map(enum bpf_map_type map_type, const char *name,
                    int key_size, int value_size,
                    int max_entries, int map_flags)
 {
-  struct bpf_create_map_attr attr = {};
+  struct bcc_create_map_attr attr = {};
 
   attr.map_type = map_type;
   attr.name = name;
@@ -583,42 +637,168 @@ int bpf_prog_get_tag(int fd, unsigned long long *ptag)
 /*    fprintf(stderr, "failed to open fdinfo %s\n", strerror(errno));*/
     return -1;
   }
-  fgets(fmt, sizeof(fmt), f); // pos
-  fgets(fmt, sizeof(fmt), f); // flags
-  fgets(fmt, sizeof(fmt), f); // mnt_id
-  fgets(fmt, sizeof(fmt), f); // prog_type
-  fgets(fmt, sizeof(fmt), f); // prog_jited
-  fgets(fmt, sizeof(fmt), f); // prog_tag
-  fclose(f);
-  char *p = strchr(fmt, ':');
-  if (!p) {
-/*    fprintf(stderr, "broken fdinfo %s\n", fmt);*/
-    return -2;
-  }
   unsigned long long tag = 0;
-  sscanf(p + 1, "%llx", &tag);
-  *ptag = tag;
-  return 0;
+  // prog_tag: can appear in different lines
+  while (fgets(fmt, sizeof(fmt), f)) {
+    if (sscanf(fmt, "prog_tag:%llx", &tag) == 1) {
+      *ptag = tag;
+      fclose(f);
+      return 0;
+    }
+  }
+  fclose(f);
+  return -2;
 }
 
-int bcc_prog_load_xattr(struct bpf_load_program_attr *attr, int prog_len,
+static int libbpf_bpf_prog_load(enum bpf_prog_type prog_type,
+                                const char *prog_name, const char *license,
+                                const struct bpf_insn *insns, size_t insn_cnt,
+                                struct bpf_prog_load_opts *opts,
+                                char *log_buf, size_t log_buf_sz)
+{
+
+  LIBBPF_OPTS(bpf_prog_load_opts, p);
+
+  if (!opts || !log_buf != !log_buf_sz) {
+    errno = EINVAL;
+    return -EINVAL;
+  }
+
+  p.expected_attach_type = opts->expected_attach_type;
+  switch (prog_type) {
+  case BPF_PROG_TYPE_STRUCT_OPS:
+  case BPF_PROG_TYPE_LSM:
+    p.attach_btf_id = opts->attach_btf_id;
+    break;
+  case BPF_PROG_TYPE_TRACING:
+  case BPF_PROG_TYPE_EXT:
+    p.attach_btf_id = opts->attach_btf_id;
+    p.attach_prog_fd = opts->attach_prog_fd;
+    p.attach_btf_obj_fd = opts->attach_btf_obj_fd;
+    break;
+  default:
+    p.prog_ifindex = opts->prog_ifindex;
+    p.kern_version = opts->kern_version;
+  }
+  p.log_level = opts->log_level;
+  p.log_buf = log_buf;
+  p.log_size = log_buf_sz;
+  p.prog_btf_fd = opts->prog_btf_fd;
+  p.func_info_rec_size = opts->func_info_rec_size;
+  p.func_info_cnt = opts->func_info_cnt;
+  p.func_info = opts->func_info;
+  p.line_info_rec_size = opts->line_info_rec_size;
+  p.line_info_cnt = opts->line_info_cnt;
+  p.line_info = opts->line_info;
+  p.prog_flags = opts->prog_flags;
+
+  return bpf_prog_load(prog_type, prog_name, license,
+                       insns, insn_cnt, &p);
+}
+
+static int find_btf_id(const char *module_name, const char *func_name,
+                       enum bpf_attach_type expected_attach_type, int *btf_fd)
+{
+  struct btf *vmlinux_btf = NULL, *module_btf = NULL;
+  struct bpf_btf_info info;
+  int err, fd, btf_id;
+  __u32 id = 0, len;
+  char name[64];
+
+  if (!module_name[0] || !strcmp(module_name, "vmlinux"))
+    return libbpf_find_vmlinux_btf_id(func_name, expected_attach_type);
+
+  while (true) {
+    err = bpf_btf_get_next_id(id, &id);
+    if (err) {
+      fprintf(stderr, "bpf_btf_get_next_id failed: %d\n", err);
+      return err;
+    }
+
+    fd = bpf_btf_get_fd_by_id(id);
+    if (fd < 0) {
+      err = fd;
+      fprintf(stderr, "bpf_btf_get_fd_by_id failed: %d\n", err);
+      return err;
+    }
+
+    len = sizeof(info);
+    memset(&info, 0, sizeof(info));
+    info.name = ptr_to_u64(name);
+    info.name_len = sizeof(name);
+
+    err = bpf_btf_get_info_by_fd(fd, &info, &len);
+    if (err) {
+      fprintf(stderr, "bpf_btf_get_info_by_fd failed: %d\n", err);
+      goto err_out;
+    }
+
+    if (!info.kernel_btf || strcmp(name, module_name)) {
+      close(fd);
+      continue;
+    }
+
+    vmlinux_btf = btf__load_vmlinux_btf();
+    err = libbpf_get_error(vmlinux_btf);
+    if (err) {
+      fprintf(stderr, "btf__load_vmlinux_btf failed: %d\n", err);
+      goto err_out;
+    }
+
+    module_btf = btf__load_module_btf(module_name, vmlinux_btf);
+    err = libbpf_get_error(vmlinux_btf);
+    if (err) {
+      fprintf(stderr, "btf__load_module_btf failed: %d\n", err);
+      goto err_out;
+    }
+
+    btf_id = btf__find_by_name_kind(module_btf, func_name, BTF_KIND_FUNC);
+    if (btf_id < 0) {
+      err = btf_id;
+      fprintf(stderr, "btf__find_by_name_kind failed: %d\n", err);
+      goto err_out;
+    }
+
+    btf__free(module_btf);
+    btf__free(vmlinux_btf);
+
+    *btf_fd = fd;
+    return btf_id;
+
+err_out:
+    btf__free(module_btf);
+    btf__free(vmlinux_btf);
+    close(fd);
+    *btf_fd = -1;
+    return err;
+  }
+
+  return -1;
+}
+
+int bcc_prog_load_xattr(enum bpf_prog_type prog_type, const char *prog_name,
+                        const char *license, const struct bpf_insn *insns,
+                        struct bpf_prog_load_opts *opts, int prog_len,
                         char *log_buf, unsigned log_buf_size, bool allow_rlimit)
 {
-  unsigned name_len = attr->name ? strlen(attr->name) : 0;
-  char *tmp_log_buf = NULL, *attr_log_buf = NULL;
-  unsigned tmp_log_buf_size = 0, attr_log_buf_size = 0;
+  unsigned name_len = prog_name ? strlen(prog_name) : 0;
+  char *tmp_log_buf = NULL, *opts_log_buf = NULL;
+  unsigned tmp_log_buf_size = 0, opts_log_buf_size = 0;
   int ret = 0, name_offset = 0, expected_attach_type = 0;
-  char prog_name[BPF_OBJ_NAME_LEN] = {};
+  char new_prog_name[BPF_OBJ_NAME_LEN] = {};
+  char mod_name[64] = {};
+  char *mod_end;
+  int mod_len;
+  int fd = -1;
 
   unsigned insns_cnt = prog_len / sizeof(struct bpf_insn);
-  attr->insns_cnt = insns_cnt;
 
-  if (attr->log_level > 0) {
+  if (opts->log_level > 0) {
     if (log_buf_size > 0) {
       // Use user-provided log buffer if available.
       log_buf[0] = 0;
-      attr_log_buf = log_buf;
-      attr_log_buf_size = log_buf_size;
+      opts_log_buf = log_buf;
+      opts_log_buf_size = log_buf_size;
     } else {
       // Create and use temporary log buffer if user didn't provide one.
       tmp_log_buf_size = LOG_BUF_SIZE;
@@ -626,82 +806,90 @@ int bcc_prog_load_xattr(struct bpf_load_program_attr *attr, int prog_len,
       if (!tmp_log_buf) {
         fprintf(stderr, "bpf: Failed to allocate temporary log buffer: %s\n\n",
                 strerror(errno));
-        attr->log_level = 0;
+        opts->log_level = 0;
       } else {
         tmp_log_buf[0] = 0;
-        attr_log_buf = tmp_log_buf;
-        attr_log_buf_size = tmp_log_buf_size;
+        opts_log_buf = tmp_log_buf;
+        opts_log_buf_size = tmp_log_buf_size;
       }
     }
   }
 
   if (name_len) {
-    if (strncmp(attr->name, "kprobe__", 8) == 0)
+    if (strncmp(prog_name, "kprobe__", 8) == 0)
       name_offset = 8;
-    else if (strncmp(attr->name, "kretprobe__", 11) == 0)
+    else if (strncmp(prog_name, "kretprobe__", 11) == 0)
       name_offset = 11;
-    else if (strncmp(attr->name, "tracepoint__", 12) == 0)
+    else if (strncmp(prog_name, "tracepoint__", 12) == 0)
       name_offset = 12;
-    else if (strncmp(attr->name, "raw_tracepoint__", 16) == 0)
+    else if (strncmp(prog_name, "raw_tracepoint__", 16) == 0)
       name_offset = 16;
-    else if (strncmp(attr->name, "kfunc__", 7) == 0) {
-      name_offset = 7;
+    else if (strncmp(prog_name, "kfunc__", 7) == 0) {
+      // kfunc__vmlinux__vfs_read
+      mod_end = strstr(prog_name + 7, "__");
+      mod_len = mod_end - prog_name - 7;
+      strncpy(mod_name, prog_name + 7, mod_len);
+      name_offset = 7 + mod_len + 2;
       expected_attach_type = BPF_TRACE_FENTRY;
-    } else if (strncmp(attr->name, "kmod_ret__", 10) == 0) {
+    } else if (strncmp(prog_name, "kmod_ret__", 10) == 0) {
       name_offset = 10;
       expected_attach_type = BPF_MODIFY_RETURN;
-    } else if (strncmp(attr->name, "kretfunc__", 10) == 0) {
-      name_offset = 10;
+    } else if (strncmp(prog_name, "kretfunc__", 10) == 0) {
+      // kretfunc__vmlinux__vfs_read
+      mod_end = strstr(prog_name + 10, "__");
+      mod_len = mod_end - prog_name - 10;
+      strncpy(mod_name, prog_name + 10, mod_len);
+      name_offset = 10 + mod_len + 2;
       expected_attach_type = BPF_TRACE_FEXIT;
-    } else if (strncmp(attr->name, "lsm__", 5) == 0) {
+    } else if (strncmp(prog_name, "lsm__", 5) == 0) {
       name_offset = 5;
       expected_attach_type = BPF_LSM_MAC;
-    } else if (strncmp(attr->name, "bpf_iter__", 10) == 0) {
+    } else if (strncmp(prog_name, "bpf_iter__", 10) == 0) {
       name_offset = 10;
       expected_attach_type = BPF_TRACE_ITER;
     }
 
-    if (attr->prog_type == BPF_PROG_TYPE_TRACING ||
-        attr->prog_type == BPF_PROG_TYPE_LSM) {
-      ret = libbpf_find_vmlinux_btf_id(attr->name + name_offset,
-                                       expected_attach_type);
+    if (prog_type == BPF_PROG_TYPE_TRACING ||
+        prog_type == BPF_PROG_TYPE_LSM) {
+      ret = find_btf_id(mod_name, prog_name + name_offset,
+                        expected_attach_type, &fd);
       if (ret == -EINVAL) {
-        fprintf(stderr, "bpf: vmlinux BTF is not found\n");
+        fprintf(stderr, "bpf: %s BTF is not found\n", mod_name);
         return ret;
       } else if (ret < 0) {
-        fprintf(stderr, "bpf: %s is not found in vmlinux BTF\n",
-                attr->name + name_offset);
+        fprintf(stderr, "bpf: %s is not found in %s BTF\n",
+                prog_name + name_offset, mod_name);
         return ret;
       }
 
-      attr->attach_btf_id = ret;
-      attr->expected_attach_type = expected_attach_type;
+      opts->attach_btf_obj_fd = fd == -1 ? 0 : fd;
+      opts->attach_btf_id = ret;
+      opts->expected_attach_type = expected_attach_type;
     }
 
-    memcpy(prog_name, attr->name + name_offset,
+    memcpy(new_prog_name, prog_name + name_offset,
            min(name_len - name_offset, BPF_OBJ_NAME_LEN - 1));
-    attr->name = prog_name;
   }
 
-  ret = bpf_load_program_xattr(attr, attr_log_buf, attr_log_buf_size);
+  ret = libbpf_bpf_prog_load(prog_type, new_prog_name, license, insns, insns_cnt, opts, opts_log_buf, opts_log_buf_size);
 
   // func_info/line_info may not be supported in old kernels.
-  if (ret < 0 && attr->func_info && errno == EINVAL) {
-    attr->prog_btf_fd = 0;
-    attr->func_info = NULL;
-    attr->func_info_cnt = 0;
-    attr->func_info_rec_size = 0;
-    attr->line_info = NULL;
-    attr->line_info_cnt = 0;
-    attr->line_info_rec_size = 0;
-    ret = bpf_load_program_xattr(attr, attr_log_buf, attr_log_buf_size);
+  if (ret < 0 && opts->func_info && errno == EINVAL) {
+    opts->prog_btf_fd = 0;
+    opts->func_info = NULL;
+    opts->func_info_cnt = 0;
+    opts->func_info_rec_size = 0;
+    opts->line_info = NULL;
+    opts->line_info_cnt = 0;
+    opts->line_info_rec_size = 0;
+    ret = libbpf_bpf_prog_load(prog_type, new_prog_name, license, insns, insns_cnt, opts, opts_log_buf, opts_log_buf_size);
   }
 
   // BPF object name is not supported on older Kernels.
   // If we failed due to this, clear the name and try again.
   if (ret < 0 && name_len && (errno == E2BIG || errno == EINVAL)) {
-    prog_name[0] = '\0';
-    ret = bpf_load_program_xattr(attr, attr_log_buf, attr_log_buf_size);
+    new_prog_name[0] = '\0';
+    ret = libbpf_bpf_prog_load(prog_type, new_prog_name, license, insns, insns_cnt, opts, opts_log_buf, opts_log_buf_size);
   }
 
   if (ret < 0 && errno == EPERM) {
@@ -720,14 +908,14 @@ int bcc_prog_load_xattr(struct bpf_load_program_attr *attr, int prog_len,
       rl.rlim_max = RLIM_INFINITY;
       rl.rlim_cur = rl.rlim_max;
       if (setrlimit(RLIMIT_MEMLOCK, &rl) == 0)
-        ret = bpf_load_program_xattr(attr, attr_log_buf, attr_log_buf_size);
+        ret = libbpf_bpf_prog_load(prog_type, new_prog_name, license, insns, insns_cnt, opts, opts_log_buf, opts_log_buf_size);
     }
   }
 
   if (ret < 0 && errno == E2BIG) {
     fprintf(stderr,
             "bpf: %s. Program %s too large (%u insns), at most %d insns\n\n",
-            strerror(errno), attr->name, insns_cnt, BPF_MAXINSNS);
+            strerror(errno), new_prog_name, insns_cnt, BPF_MAXINSNS);
     return -1;
   }
 
@@ -736,9 +924,9 @@ int bcc_prog_load_xattr(struct bpf_load_program_attr *attr, int prog_len,
     // User has provided a log buffer.
     if (log_buf_size) {
       // If logging is not already enabled, enable it and do the syscall again.
-      if (attr->log_level == 0) {
-        attr->log_level = 1;
-        ret = bpf_load_program_xattr(attr, log_buf, log_buf_size);
+      if (opts->log_level == 0) {
+        opts->log_level = 1;
+        ret = libbpf_bpf_prog_load(prog_type, new_prog_name, license, insns, insns_cnt, opts, log_buf, log_buf_size);
       }
       // Print the log message and return.
       bpf_print_hints(ret, log_buf);
@@ -752,8 +940,8 @@ int bcc_prog_load_xattr(struct bpf_load_program_attr *attr, int prog_len,
     if (tmp_log_buf)
       free(tmp_log_buf);
     tmp_log_buf_size = LOG_BUF_SIZE;
-    if (attr->log_level == 0)
-      attr->log_level = 1;
+    if (opts->log_level == 0)
+      opts->log_level = 1;
     for (;;) {
       tmp_log_buf = malloc(tmp_log_buf_size);
       if (!tmp_log_buf) {
@@ -762,7 +950,7 @@ int bcc_prog_load_xattr(struct bpf_load_program_attr *attr, int prog_len,
         goto return_result;
       }
       tmp_log_buf[0] = 0;
-      ret = bpf_load_program_xattr(attr, tmp_log_buf, tmp_log_buf_size);
+      ret = libbpf_bpf_prog_load(prog_type, new_prog_name, license, insns, insns_cnt, opts, tmp_log_buf, tmp_log_buf_size);
       if (ret < 0 && errno == ENOSPC) {
         // Temporary buffer size is not enough. Double it and try again.
         free(tmp_log_buf);
@@ -776,7 +964,7 @@ int bcc_prog_load_xattr(struct bpf_load_program_attr *attr, int prog_len,
 
   // Check if we should print the log message if log_level is not 0,
   // either specified by user or set due to error.
-  if (attr->log_level > 0) {
+  if (opts->log_level > 0) {
     // Don't print if user enabled logging and provided log buffer,
     // but there is no error.
     if (log_buf && ret < 0)
@@ -786,6 +974,8 @@ int bcc_prog_load_xattr(struct bpf_load_program_attr *attr, int prog_len,
   }
 
 return_result:
+  if (fd >= 0)
+    close(fd);
   if (tmp_log_buf)
     free(tmp_log_buf);
   return ret;
@@ -796,16 +986,13 @@ int bcc_prog_load(enum bpf_prog_type prog_type, const char *name,
                   const char *license, unsigned kern_version,
                   int log_level, char *log_buf, unsigned log_buf_size)
 {
-  struct bpf_load_program_attr attr = {};
+  struct bpf_prog_load_opts opts = {};
 
-  attr.prog_type = prog_type;
-  attr.name = name;
-  attr.insns = insns;
-  attr.license = license;
+
   if (prog_type != BPF_PROG_TYPE_TRACING && prog_type != BPF_PROG_TYPE_EXT)
-    attr.kern_version = kern_version;
-  attr.log_level = log_level;
-  return bcc_prog_load_xattr(&attr, prog_len, log_buf, log_buf_size, true);
+    opts.kern_version = kern_version;
+  opts.log_level = log_level;
+  return bcc_prog_load_xattr(prog_type, name, license, insns, &opts, prog_len, log_buf, log_buf_size, true);
 }
 
 int bpf_open_raw_sock(const char *name)
@@ -951,9 +1138,21 @@ static int bpf_try_perf_event_open_with_probe(const char *name, uint64_t offs,
                  PERF_FLAG_FD_CLOEXEC);
 }
 
+#define DEBUGFS_TRACEFS "/sys/kernel/debug/tracing"
+#define TRACEFS "/sys/kernel/tracing"
+
+static const char *get_tracefs_path()
+{
+  if (access(DEBUGFS_TRACEFS, F_OK) == 0) {
+    return DEBUGFS_TRACEFS;
+  }
+  return TRACEFS;
+}
+
+
 // When a valid Perf Event FD provided through pfd, it will be used to enable
 // and attach BPF program to the event, and event_path will be ignored.
-// Otherwise, event_path is expected to contain the path to the event in debugfs
+// Otherwise, event_path is expected to contain the path to the event in tracefs
 // and it will be used to open the Perf Event FD.
 // In either case, if the attach partially failed (such as issue with the
 // ioctl operations), the **caller** need to clean up the Perf Event FD, either
@@ -965,7 +1164,7 @@ static int bpf_attach_tracing_event(int progfd, const char *event_path, int pid,
   ssize_t bytes;
   char buf[PATH_MAX];
   struct perf_event_attr attr = {};
-  // Caller did not provided a valid Perf Event FD. Create one with the debugfs
+  // Caller did not provide a valid Perf Event FD. Create one with the tracefs
   // event path provided.
   if (*pfd < 0) {
     snprintf(buf, sizeof(buf), "%s/id", event_path);
@@ -1014,7 +1213,7 @@ static int bpf_attach_tracing_event(int progfd, const char *event_path, int pid,
   return 0;
 }
 
-/* Creates an [uk]probe using debugfs.
+/* Creates an [uk]probe using tracefs.
  * On success, the path to the probe is placed in buf (which is assumed to be of size PATH_MAX).
  */
 static int create_probe_event(char *buf, const char *ev_name,
@@ -1026,7 +1225,7 @@ static int create_probe_event(char *buf, const char *ev_name,
   char ev_alias[256];
   bool is_kprobe = strncmp("kprobe", event_type, 6) == 0;
 
-  snprintf(buf, PATH_MAX, "/sys/kernel/debug/tracing/%s_events", event_type);
+  snprintf(buf, PATH_MAX, "%s/%s_events", get_tracefs_path(), event_type);
   kfd = open(buf, O_WRONLY | O_APPEND, 0);
   if (kfd < 0) {
     fprintf(stderr, "%s: open(%s): %s\n", __func__, buf,
@@ -1071,7 +1270,7 @@ static int create_probe_event(char *buf, const char *ev_name,
     goto error;
   }
   close(kfd);
-  snprintf(buf, PATH_MAX, "/sys/kernel/debug/tracing/events/%ss/%s",
+  snprintf(buf, PATH_MAX, "%s/events/%ss/%s", get_tracefs_path(),
            event_type, ev_alias);
   return 0;
 error:
@@ -1086,7 +1285,7 @@ static int bpf_attach_probe(int progfd, enum bpf_probe_attach_type attach_type,
                             uint32_t ref_ctr_offset)
 {
   int kfd, pfd = -1;
-  char buf[PATH_MAX], fname[256];
+  char buf[PATH_MAX], fname[256], kprobe_events[PATH_MAX];
   bool is_kprobe = strncmp("kprobe", event_type, 6) == 0;
 
   if (maxactive <= 0)
@@ -1097,14 +1296,14 @@ static int bpf_attach_probe(int progfd, enum bpf_probe_attach_type attach_type,
 
   // If failed, most likely Kernel doesn't support the perf_kprobe PMU
   // (e12f03d "perf/core: Implement the 'perf_kprobe' PMU") yet.
-  // Try create the event using debugfs.
+  // Try create the event using tracefs.
   if (pfd < 0) {
     if (create_probe_event(buf, ev_name, attach_type, config1, offset,
                            event_type, pid, maxactive) < 0)
       goto error;
 
     // If we're using maxactive, we need to check that the event was created
-    // under the expected name.  If debugfs doesn't support maxactive yet
+    // under the expected name.  If tracefs doesn't support maxactive yet
     // (kernel < 4.12), the event is created under a different name; we need to
     // delete that event and start again without maxactive.
     if (is_kprobe && maxactive > 0 && attach_type == BPF_PROBE_RETURN) {
@@ -1113,12 +1312,11 @@ static int bpf_attach_probe(int progfd, enum bpf_probe_attach_type attach_type,
         goto error;
       }
       if (access(fname, F_OK) == -1) {
+        snprintf(kprobe_events, PATH_MAX, "%s/kprobe_events", get_tracefs_path());
         // Deleting kprobe event with incorrect name.
-        kfd = open("/sys/kernel/debug/tracing/kprobe_events",
-                   O_WRONLY | O_APPEND, 0);
+        kfd = open(kprobe_events, O_WRONLY | O_APPEND, 0);
         if (kfd < 0) {
-          fprintf(stderr, "open(/sys/kernel/debug/tracing/kprobe_events): %s\n",
-                  strerror(errno));
+          fprintf(stderr, "open(%s): %s\n", kprobe_events, strerror(errno));
           return -1;
         }
         snprintf(fname, sizeof(fname), "-:kprobes/%s_0", ev_name);
@@ -1160,10 +1358,42 @@ int bpf_attach_kprobe(int progfd, enum bpf_probe_attach_type attach_type,
                           fn_offset, -1, maxactive, 0);
 }
 
+static int _find_archive_path_and_offset(const char *entry_path,
+                                         char out_path[PATH_MAX],
+                                         uint64_t *offset) {
+  const char *separator = strstr(entry_path, "!/");
+  if (separator == NULL || (separator - entry_path) >= PATH_MAX) {
+    return -1;
+  }
+
+  struct bcc_zip_entry entry;
+  struct bcc_zip_archive *archive =
+      bcc_zip_archive_open_and_find(entry_path, &entry);
+  if (archive == NULL) {
+    return -1;
+  }
+  if (entry.compression) {
+    bcc_zip_archive_close(archive);
+    return -1;
+  }
+
+  strncpy(out_path, entry_path, separator - entry_path);
+  out_path[separator - entry_path] = 0;
+  *offset += entry.data_offset;
+
+  bcc_zip_archive_close(archive);
+  return 0;
+}
+
 int bpf_attach_uprobe(int progfd, enum bpf_probe_attach_type attach_type,
                       const char *ev_name, const char *binary_path,
                       uint64_t offset, pid_t pid, uint32_t ref_ctr_offset)
 {
+  char archive_path[PATH_MAX];
+  if (access(binary_path, F_OK) != 0 &&
+      _find_archive_path_and_offset(binary_path, archive_path, &offset) == 0) {
+    binary_path = archive_path;
+  }
 
   return bpf_attach_probe(progfd, attach_type,
                           ev_name, binary_path, "uprobe",
@@ -1185,7 +1415,7 @@ static int bpf_detach_probe(const char *ev_name, const char *event_type)
    * the %s_bcc_%d line in [k,u]probe_events. If the event is not found,
    * it is safe to skip the cleaning up process (write -:... to the file).
    */
-  snprintf(buf, sizeof(buf), "/sys/kernel/debug/tracing/%s_events", event_type);
+  snprintf(buf, sizeof(buf), "%s/%s_events", get_tracefs_path(), event_type);
   fp = fopen(buf, "r");
   if (!fp) {
     fprintf(stderr, "open(%s): %s\n", buf, strerror(errno));
@@ -1210,7 +1440,7 @@ static int bpf_detach_probe(const char *ev_name, const char *event_type)
   if (!found_event)
     return 0;
 
-  snprintf(buf, sizeof(buf), "/sys/kernel/debug/tracing/%s_events", event_type);
+  snprintf(buf, sizeof(buf), "%s/%s_events", get_tracefs_path(), event_type);
   kfd = open(buf, O_WRONLY | O_APPEND, 0);
   if (kfd < 0) {
     fprintf(stderr, "open(%s): %s\n", buf, strerror(errno));
@@ -1254,8 +1484,7 @@ int bpf_attach_tracepoint(int progfd, const char *tp_category,
   char buf[256];
   int pfd = -1;
 
-  snprintf(buf, sizeof(buf), "/sys/kernel/debug/tracing/events/%s/%s",
-           tp_category, tp_name);
+  snprintf(buf, sizeof(buf), "%s/events/%s/%s", get_tracefs_path(), tp_category, tp_name);
   if (bpf_attach_tracing_event(progfd, buf, -1 /* PID */, &pfd) == 0)
     return pfd;
 
@@ -1283,15 +1512,111 @@ int bpf_attach_raw_tracepoint(int progfd, const char *tp_name)
 
 bool bpf_has_kernel_btf(void)
 {
-  return libbpf_find_vmlinux_btf_id("bpf_prog_put", 0) > 0;
+  struct btf *btf;
+  int err;
+
+  btf = btf__parse_raw("/sys/kernel/btf/vmlinux");
+  err = libbpf_get_error(btf);
+  if (err)
+    return false;
+
+  btf__free(btf);
+  return true;
+}
+
+static int find_member_by_name(struct btf *btf, const struct btf_type *btf_type, const char *field_name) {
+  const struct btf_member *btf_member = btf_members(btf_type);
+  int i;
+
+  for (i = 0; i < btf_vlen(btf_type); i++, btf_member++) {
+    const char *name = btf__name_by_offset(btf, btf_member->name_off);
+    if (!strcmp(name, field_name)) {
+      return 1;
+    } else if (name[0] == '\0') {
+      if (find_member_by_name(btf, btf__type_by_id(btf, btf_member->type), field_name))
+        return 1;
+    }
+  }
+  return 0;
+}
+
+static int find_val_in_enum(struct btf *btf, const struct btf_type *btf_type, const char * val_name)
+{
+  const struct btf_enum *enums = btf_enum(btf_type);
+  uint16_t vlen = BTF_INFO_VLEN(btf_type->info);
+  int found = 0;
+
+  for (uint16_t i = 0; i < vlen; i++) {
+    const struct btf_enum *e = &enums[i];
+    const char *member_name = btf__name_by_offset(btf, e->name_off);
+
+    if (member_name && strcmp(member_name, val_name) == 0) {
+      found = 1;
+      break;
+    }
+  }
+  return found;
+}
+
+static int find_enum_by_name(struct btf *btf, const char *enum_name, const char *val_name)
+{
+  const struct btf_type *btf_type;
+  int ret, btf_id;
+
+  btf_id = btf__find_by_name_kind(btf, enum_name, BTF_KIND_ENUM);
+  if (btf_id < 0) {
+    ret = -1;
+  } else {
+    btf_type = btf__type_by_id(btf, btf_id);
+    ret = find_val_in_enum(btf, btf_type, val_name);
+  }
+  return ret;
+}
+
+static int find_enum_by_anony(struct btf *btf, const char *val_name)
+{
+  __u32 nr_types;
+  int ret = 0;
+
+  nr_types = btf__type_cnt(btf);
+
+  for (int i = 1; i < nr_types; i++) {
+    const struct btf_type *btf_type = btf__type_by_id(btf, i);
+
+    if (!btf_type || btf_kind(btf_type) != BTF_KIND_ENUM || btf_type->name_off != 0)
+      continue;
+
+    ret = find_val_in_enum(btf, btf_type, val_name);
+    if (ret)
+      break;
+  }
+  return ret;
+}
+
+int kernel_enum_has_val(const char *enum_name, const char *val_name)
+{
+  struct btf *btf;
+  int ret;
+
+  btf = btf__load_vmlinux_btf();
+  ret = libbpf_get_error(btf);
+  if (ret)
+    return -1;
+
+  if (!enum_name || strlen(enum_name) == 0)
+    ret = find_enum_by_anony(btf, val_name);
+  else
+    ret = find_enum_by_name(btf, enum_name, val_name);
+
+  btf__free(btf);
+  return ret;
 }
 
 int kernel_struct_has_field(const char *struct_name, const char *field_name)
 {
   const struct btf_type *btf_type;
-  const struct btf_member *btf_member;
   struct btf *btf;
-  int i, ret, btf_id;
+  int ret, btf_id;
 
   btf = btf__load_vmlinux_btf();
   ret = libbpf_get_error(btf);
@@ -1305,14 +1630,7 @@ int kernel_struct_has_field(const char *struct_name, const char *field_name)
   }
 
   btf_type = btf__type_by_id(btf, btf_id);
-  btf_member = btf_members(btf_type);
-  for (i = 0; i < btf_vlen(btf_type); i++, btf_member++) {
-    if (!strcmp(btf__name_by_offset(btf, btf_member->name_off), field_name)) {
-      ret = 1;
-      goto cleanup;
-    }
-  }
-  ret = 0;
+  ret = find_member_by_name(btf, btf_type, field_name);
 
 cleanup:
   btf__free(btf);
@@ -1341,8 +1659,22 @@ int bpf_attach_lsm(int prog_fd)
 
 void * bpf_open_perf_buffer(perf_reader_raw_cb raw_cb,
                             perf_reader_lost_cb lost_cb, void *cb_cookie,
-                            int pid, int cpu, int page_cnt) {
-  int pfd;
+                            int pid, int cpu, int page_cnt)
+{
+  struct bcc_perf_buffer_opts opts = {
+    .pid = pid,
+    .cpu = cpu,
+    .wakeup_events = 1,
+  };
+
+  return bpf_open_perf_buffer_opts(raw_cb, lost_cb, cb_cookie, page_cnt, &opts);
+}
+
+void * bpf_open_perf_buffer_opts(perf_reader_raw_cb raw_cb,
+                            perf_reader_lost_cb lost_cb, void *cb_cookie,
+                            int page_cnt, struct bcc_perf_buffer_opts *opts)
+{
+  int pfd, pid = opts->pid, cpu = opts->cpu;
   struct perf_event_attr attr = {};
   struct perf_reader *reader = NULL;
 
@@ -1354,7 +1686,7 @@ void * bpf_open_perf_buffer(perf_reader_raw_cb raw_cb,
   attr.type = PERF_TYPE_SOFTWARE;
   attr.sample_type = PERF_SAMPLE_RAW;
   attr.sample_period = 1;
-  attr.wakeup_events = 1;
+  attr.wakeup_events = opts->wakeup_events;
   pfd = syscall(__NR_perf_event_open, &attr, pid, cpu, -1, PERF_FLAG_FD_CLOEXEC);
   if (pfd < 0) {
     fprintf(stderr, "perf_event_open: %s\n", strerror(errno));
@@ -1456,7 +1788,7 @@ int bpf_attach_xdp(const char *dev_name, int progfd, uint32_t flags) {
     return -1;
   }
 
-  ret = bpf_set_link_xdp_fd(ifindex, progfd, flags);
+  ret = bpf_xdp_attach(ifindex, progfd, flags, NULL);
   if (ret) {
     libbpf_strerror(ret, err_buf, sizeof(err_buf));
     fprintf(stderr, "bpf: Attaching prog to %s: %s\n", dev_name, err_buf);

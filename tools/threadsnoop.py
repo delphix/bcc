@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # @lint-avoid-python-3-compatibility-imports
 #
 # threadsnoop   List new thread creation.
@@ -14,6 +14,20 @@
 
 from __future__ import print_function
 from bcc import BPF
+import argparse
+
+examples = """examples:
+    ./threadsnoop        # list new thread creation
+"""
+
+description = """
+List new thread creation.
+"""
+
+parser = argparse.ArgumentParser(description=description,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=examples)
+args = parser.parse_args()
 
 # load BPF program
 b = BPF(text="""
@@ -45,7 +59,7 @@ try:
 except Exception:
     b.attach_uprobe(name="c", sym="pthread_create", fn_name="do_entry")
 
-print("%-10s %-6s %-16s %s" % ("TIME(ms)", "PID", "COMM", "FUNC"))
+print("%-10s %-7s %-16s %s" % ("TIME(ms)", "PID", "COMM", "FUNC"))
 
 start_ts = 0
 
@@ -55,11 +69,11 @@ def print_event(cpu, data, size):
     event = b["events"].event(data)
     if start_ts == 0:
         start_ts = event.ts
-    func = b.sym(event.start, event.pid)
+    func = b.sym(event.start, event.pid).decode('utf-8', 'replace')
     if (func == "[unknown]"):
         func = hex(event.start)
-    print("%-10d %-6d %-16s %s" % ((event.ts - start_ts) / 1000000,
-        event.pid, event.comm, func))
+    print("%-10d %-7d %-16s %s" % ((event.ts - start_ts) / 1000000,
+        event.pid, event.comm.decode('utf-8', 'replace'), func))
 
 b["events"].open_perf_buffer(print_event)
 while 1:

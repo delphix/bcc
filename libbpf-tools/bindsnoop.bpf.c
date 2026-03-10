@@ -5,15 +5,24 @@
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_endian.h>
+
 #include "bindsnoop.h"
-#include "maps.bpf.h"
+#include "core_fixes.bpf.h"
 
 #define MAX_ENTRIES	10240
 #define MAX_PORTS	1024
 
+const volatile bool filter_cg = false;
 const volatile pid_t target_pid = 0;
 const volatile bool ignore_errors = true;
 const volatile bool filter_by_port = false;
+
+struct {
+	__uint(type, BPF_MAP_TYPE_CGROUP_ARRAY);
+	__type(key, u32);
+	__type(value, u32);
+	__uint(max_entries, 1);
+} cgroup_map SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -78,9 +87,9 @@ static int probe_exit(struct pt_regs *ctx, short ver)
 	if (filter_by_port && !port)
 		goto cleanup;
 
-	opts.fields.freebind             = BPF_CORE_READ_BITFIELD_PROBED(inet_sock, freebind);
-	opts.fields.transparent          = BPF_CORE_READ_BITFIELD_PROBED(inet_sock, transparent);
-	opts.fields.bind_address_no_port = BPF_CORE_READ_BITFIELD_PROBED(inet_sock, bind_address_no_port);
+	opts.fields.freebind             = get_inet_sock_freebind(inet_sock);
+	opts.fields.transparent          = get_inet_sock_transparent(inet_sock);
+	opts.fields.bind_address_no_port = get_inet_sock_bind_address_no_port(inet_sock);
 	opts.fields.reuseaddress         = BPF_CORE_READ_BITFIELD_PROBED(sock, __sk_common.skc_reuse);
 	opts.fields.reuseport            = BPF_CORE_READ_BITFIELD_PROBED(sock, __sk_common.skc_reuseport);
 	event.opts = opts.data;
@@ -108,24 +117,36 @@ cleanup:
 SEC("kprobe/inet_bind")
 int BPF_KPROBE(ipv4_bind_entry, struct socket *socket)
 {
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
+
 	return probe_entry(ctx, socket);
 }
 
 SEC("kretprobe/inet_bind")
 int BPF_KRETPROBE(ipv4_bind_exit)
 {
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
+
 	return probe_exit(ctx, 4);
 }
 
 SEC("kprobe/inet6_bind")
 int BPF_KPROBE(ipv6_bind_entry, struct socket *socket)
 {
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
+
 	return probe_entry(ctx, socket);
 }
 
 SEC("kretprobe/inet6_bind")
 int BPF_KRETPROBE(ipv6_bind_exit)
 {
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
+
 	return probe_exit(ctx, 6);
 }
 
